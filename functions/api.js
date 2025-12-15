@@ -1,7 +1,10 @@
 import serverless from 'serverless-http';
-import app from '../src/app.js';
+import appModule from '../src/app.js';
 import { SuscripcionModel } from '../src/models/suscripcion.model.js';
 import 'dotenv/config';
+
+// 🔥 ESTA LÍNEA ES LA CLAVE
+const app = appModule?.default ?? appModule;
 
 try {
   SuscripcionModel.init().catch(() => {
