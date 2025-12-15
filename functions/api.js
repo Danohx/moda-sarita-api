@@ -1,6 +1,6 @@
 import serverless from 'serverless-http';
-import app from '#src/app'; 
-import { SuscripcionModel } from '#models/suscripcion.model';
+import app from '../src/app.js'; 
+import { SuscripcionModel } from '../src/models/suscripcion.model.js';
 import 'dotenv/config';
 
 try {
