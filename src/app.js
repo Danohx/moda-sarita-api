@@ -7,7 +7,8 @@ const app = express();
 const whitelist = [
   'http://localhost:5173',
   'https://moda-sarita.com',
-  'https://www.moda-sarita.com'
+  'https://www.moda-sarita.com',
+  'https://moda-sarita-api.netlify.app'
 ];
 
 // --- 1. Configuraciones (Middlewares) ---
