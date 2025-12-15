@@ -6,7 +6,7 @@ const resend = new Resend(process.env.ModaSaritaAPI);
 export const enviarCorreo = async (destinatario, asunto, html) => {
   try {
     const { data, error } = await resend.emails.send({
-      from: 'Moda Sarita <no-reply@moda-sarita.com>',
+      from: 'Moda Sarita <comunicados@moda-sarita.com>',
       to: [destinatario],
       subject: asunto,
       html: html,
