@@ -1,5 +1,5 @@
-import { SuscripcionModel } from '#models/suscripcion.model';
-import { enviarCorreo } from '#config/mailer.config';
+import { SuscripcionModel } from '../models/suscripcion.model.js';
+import { enviarCorreo } from '../config/mailer.config.js';
 
 export const suscribirUsuario = async (req, res) => {
   const { email } = req.body;
