@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
-import suscripcionRoutes from './routes/suscripcion.routes.js';
+import suscripcionRoutesModule from './routes/suscripcion.routes.js';
+
+const suscripcionRoutes = suscripcionRoutesModule.default ?? suscripcionRoutesModule;
 
 const app = express();
 
