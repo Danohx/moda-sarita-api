@@ -2,14 +2,6 @@
   "name": "moda-sarita-api",
   "version": "0.1.0",
   "type": "module",
-  "imports": {
-    "#config/*": "./src/config/*.js",
-    "#controllers/*": "./src/controllers/*.js",
-    "#models/*": "./src/models/*.js",
-    "#routes/*": "./src/routes/*.js",
-    "#middlewares/*": "./src/middlewares/*.js",
-    "#src/*": "./src/*.js"
-  },
   "description": "",
   "main": "index.js",
   "scripts": {
