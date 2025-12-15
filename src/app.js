@@ -25,6 +25,8 @@ app.use(cors({
 
 // --- 2. Rutas ---
 app.get('/', (req, res) => res.send('API Moda Sarita v0.1.0 👗'));
+console.log('suscripcionRoutes =', suscripcionRoutes);
+console.log('type:', typeof suscripcionRoutes);
 app.use('/api/suscripcion', suscripcionRoutes);
 
 // --- 3. Exportar (NO escuchar) ---
