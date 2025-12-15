@@ -13,4 +13,6 @@ try {
   console.log("Error inicializando contexto de BD");
 }
 
-export const handler = serverless(app);
+export const handler = serverless(app, {
+  basePath: '/.netlify/functions/api'
+});
