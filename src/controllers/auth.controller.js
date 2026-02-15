@@ -529,3 +529,11 @@ export const revokeAllSessions = async (req, res) => {
 export const verifySession = (req, res) => {
   return res.json({ ok: true, user: req.user });
 };
+
+function signAccessToken(userId) {
+  return jwt.sign(
+    { sub: userId },
+    process.env.JWT_SECRET,
+    { expiresIn: "15m" }
+  );
+}

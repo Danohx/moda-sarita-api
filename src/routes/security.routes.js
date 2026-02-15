@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { body, validationResult } from "express-validator";
 import { setup2FA, enable2FA } from "../controllers/security.controller.js";
-import { authenticateJWT } from "../middleware/seguridad.js";
+import { requireAuth } from "../middleware/seguridad.js";
 
 const router = Router();
 
@@ -17,11 +17,11 @@ const validar = (req, res, next) => {
   next();
 };
 
-router.post("/2fa/setup", authenticateJWT, setup2FA);
+router.post("/2fa/setup", requireAuth, setup2FA);
 
 router.post(
   "/2fa/enable",
-  authenticateJWT,
+  requireAuth,
   body("token").isString().notEmpty(),
   validar,
   enable2FA

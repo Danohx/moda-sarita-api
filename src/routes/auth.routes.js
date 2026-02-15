@@ -1,7 +1,6 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
-
 import {
   register,
   login,
@@ -15,8 +14,7 @@ import {
   revokeAllSessions,
   verifySession,
 } from "../controllers/auth.controller.js";
-
-import { authenticateJWT } from "../middleware/seguridad.js";
+import { requireAuth, requirePermission } from "../middleware/seguridad.js";
 
 const router = Router();
 
@@ -128,7 +126,26 @@ router.post(
   logout
 );
 
-router.post("/revoke-all", authenticateJWT, revokeAllSessions);
-router.get("/verify", authenticateJWT, verifySession);
+router.post("/revoke-all", requireAuth, revokeAllSessions);
+router.get("/verify", requireAuth, verifySession);
+
+router.get("/me", requireAuth, (req, res) => {
+  res.json(req.user);
+});
+
+// Prueba
+router.get(
+  "/rbac-test",
+  requireAuth,
+  requirePermission("seguridad.roles.manage"),
+  (req, res) => {
+    res.json({
+      ok: true,
+      mensaje: "Tienes permiso seguridad.roles.manage",
+      user: req.user
+    });
+  }
+);
+
 
 export default router;

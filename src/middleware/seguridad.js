@@ -7,9 +7,14 @@ export function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-export function generateAccessToken({ userId, correo, sid, tfa }) {
+export function generateAccessToken(payload) {
   return jwt.sign(
-    { sub: userId, correo, sid, tfa: !!tfa },
+    { 
+      sub: payload.userId, 
+      correo: payload.correo, 
+      sid: payload.sid, 
+      tfa: !!payload.tfa 
+    },
     process.env.JWT_SECRET,
     { expiresIn: "15m" }
   );
@@ -59,48 +64,110 @@ export function verify2FAToken(secret, token) {
   });
 }
 
-export const authenticateJWT = async (req, res, next) => {
-  const h = req.headers.authorization;
-  if (!h?.startsWith("Bearer ")) 
-    return res.status(401).json({ mensaje: "No autenticado" });
-
+export async function requireAuth(req, res, next) {
   try {
-    const token = h.split(" ")[1];
-    const payload = verifyAccessToken(token);
+    const token =
+      req.cookies?.access_token ||
+      (req.headers.authorization?.startsWith("Bearer ")
+        ? req.headers.authorization.slice(7)
+        : null);
 
-    if (!payload?.sub) 
-      return res.status(401).json({ mensaje: "Token inválido (sin sub)" });
+    if (!token) 
+      return res.status(401).json({ message: "No autenticado" });
 
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+
+    const userId = payload.sub;
     const sid = payload.sid;
-    if (!sid) 
-      return res.status(401).json({ mensaje: "Sesión inválida (sin sid)" });
 
-    let rows;
-    try {
-      const r = await pool.query(
-        `select id, user_id, expires_at, revoked_at
-         from seguridad.user_sessions
-         where id = $1`,
-        [sid]
-      );
-      rows = r.rows;
-    } catch (dbErr) {
-      console.error("DB error en authenticateJWT:", dbErr);
-      return res.status(500).json({ mensaje: "Error verificando sesión." });
+    if (!userId) 
+      return res.status(401).json({ message: "Token inválido (sin sub)" });
+
+    if (!sid) 
+      return res.status(401).json({ message: "Sesión inválida (sin sid)" });
+
+    const sRes = await pool.query(
+      `SELECT id, expires_at, revoked_at
+      FROM seguridad.user_sessions
+      WHERE id = $1 AND user_id = $2`,
+      [sid, userId]
+    );
+
+    if (sRes.rows.length === 0)
+      return res.status(401).json({ message: "Sesión no existe" });
+
+    const s = sRes.rows[0];
+    if (s.revoked_at)
+      return res.status(401).json({ message: "Sesión revocada" });
+
+    if (new Date(s.expires_at) <= new Date())
+      return res.status(401).json({ message: "Sesión expirada" });
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        u.id as user_id,
+        u.email,
+        u.nombres,
+        u.apellido_paterno,
+        u.apellido_materno,
+        r.nombre as rol,
+        array_remove(array_agg(ppr.permiso_slug), null) AS permisos
+      FROM seguridad.usuarios u
+      LEFT JOIN seguridad.roles_sistema r ON r.id = u.rol_id
+      LEFT JOIN seguridad.permisos_por_rol ppr ON ppr.rol_id = r.id
+      WHERE u.id = $1 AND u.activo = TRUE
+      GROUP BY u.id, u.email, u.nombres, u.apellido_paterno, u.apellido_materno, r.nombre
+      `,
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(401).json({ message: "Usuario no existe o inactivo" });
     }
 
-    if (rows.length === 0) 
-      return res.status(401).json({ mensaje: "Sesión no existe" });
+    const u = rows[0];
+    req.user = {
+      id: u.user_id,
+      email: u.email,
+      nombre: `${u.nombres} ${u.apellido_paterno}${u.apellido_materno ? " " + u.apellido_materno : ""}`,
+      rol: u.rol || "SIN_ROL",
+      permisos: u.permisos || [],
+      sid,
+      tfa: !!payload.tfa,
+    };
 
-    const s = rows[0];
-    if (s.revoked_at) 
-      return res.status(401).json({ mensaje: "Sesión revocada" });
-    if (new Date(s.expires_at) <= new Date()) 
-      return res.status(401).json({ mensaje: "Sesión expirada" });
-
-    req.user = { id: payload.sub, correo: payload.correo, sid: payload.sid, tfa: payload.tfa };
-    next();
-  } catch (e) {
-    return res.status(403).json({ mensaje: "Token inválido o expirado" });
+    return next();
+  } catch (err) {
+    return res.status(401).json({ message: "No autenticado", detail: err?.message });
   }
-};
+}
+
+export function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) 
+      return res.status(401).json({ message: "No autenticado" });
+    if (!roles.includes(req.user.rol))
+      return res.status(403).json({ message: "No autorizado (rol)" });
+    next();
+  };
+}
+
+export function requirePermission(...perms) {
+  return (req, res, next) => {
+    if (!req.user) 
+      return res.status(401).json({ message: "No autenticado" });
+
+    const userPerms = new Set(req.user.permisos || []);
+    const ok = perms.every((p) => userPerms.has(p));
+
+    if (!ok) {
+      return res.status(403).json({
+        message: "No autorizado (permiso)",
+        required: perms,
+        rol: req.user.rol,
+      });
+    }
+    next();
+  };
+}
