@@ -52,3 +52,122 @@ export const enable2FA = async (req, res) => {
         return res.status(500).json({ mensaje: "Error al procesar 2FA." });
     }
 };
+
+export const listRoles = async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `select id, nombre, descripcion
+       from seguridad.roles_sistema
+       order by id asc`
+    );
+    return res.json({ ok: true, roles: rows });
+  } catch (err) {
+    console.error("listRoles error:", err);
+    return res.status(500).json({ ok: false, mensaje: "Error al listar roles." });
+  }
+};
+
+export const listPermisos = async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `select slug, nombre_legible, descripcion
+       from seguridad.catalogo_permisos
+       order by slug asc`
+    );
+    return res.json({ ok: true, permisos: rows });
+  } catch (err) {
+    console.error("listPermisos error:", err);
+    return res.status(500).json({ ok: false, mensaje: "Error al listar permisos." });
+  }
+};
+
+export const getPermisosRol = async (req, res) => {
+  const { rolId } = req.params;
+
+  try {
+    const { rows } = await pool.query(
+      `select ppr.permiso_slug
+       from seguridad.permisos_por_rol ppr
+       where ppr.rol_id = $1
+       order by ppr.permiso_slug asc`,
+      [rolId]
+    );
+
+    return res.json({ ok: true, rolId, permisos: rows.map(r => r.permiso_slug) });
+  } catch (err) {
+    console.error("getPermisosRol error:", err);
+    return res.status(500).json({ ok: false, mensaje: "Error al consultar permisos del rol." });
+  }
+};
+
+export const setPermisosRol = async (req, res) => {
+  const { rolId } = req.params;
+  const { permisos } = req.body;
+
+  if (!Array.isArray(permisos)) {
+    return res.status(400).json({ ok: false, mensaje: "permisos debe ser un arreglo de slugs." });
+  }
+
+  const uniquePerms = [...new Set(permisos.map(p => String(p).trim()).filter(Boolean))];
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+
+    const rolRes = await client.query(
+      `select id, nombre from seguridad.roles_sistema where id = $1`,
+      [rolId]
+    );
+    if (rolRes.rows.length === 0) {
+      await client.query("rollback");
+      return res.status(404).json({ ok: false, mensaje: "Rol no encontrado." });
+    }
+
+    if (uniquePerms.length > 0) {
+      const catRes = await client.query(
+        `select slug from seguridad.catalogo_permisos where slug = any($1::varchar[])`,
+        [uniquePerms]
+      );
+      const existentes = new Set(catRes.rows.map(r => r.slug));
+      const faltantes = uniquePerms.filter(p => !existentes.has(p));
+
+      if (faltantes.length > 0) {
+        await client.query("rollback");
+        return res.status(400).json({
+          ok: false,
+          mensaje: "Hay permisos que no existen en el catálogo.",
+          faltantes,
+        });
+      }
+    }
+
+    await client.query(
+      `delete from seguridad.permisos_por_rol where rol_id = $1`,
+      [rolId]
+    );
+
+    for (const slug of uniquePerms) {
+      await client.query(
+        `insert into seguridad.permisos_por_rol (rol_id, permiso_slug)
+         values ($1, $2)
+         on conflict do nothing`,
+        [rolId, slug]
+      );
+    }
+
+    await client.query("commit");
+
+    return res.json({
+      ok: true,
+      mensaje: "Permisos actualizados.",
+      rolId,
+      permisos: uniquePerms,
+    });
+  } catch (err) {
+    await client.query("rollback");
+    console.error("setPermisosRol error:", err);
+    return res.status(500).json({ ok: false, mensaje: "Error al asignar permisos al rol." });
+  } finally {
+    client.release();
+  }
+};

@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { body, validationResult } from "express-validator";
-import { setup2FA, enable2FA } from "../controllers/security.controller.js";
-import { requireAuth } from "../middleware/seguridad.js";
+import { setup2FA, enable2FA, listRoles, listPermisos, getPermisosRol, setPermisosRol } from "../controllers/security.controller.js";
+import { requireAuth, requirePermission } from "../middleware/seguridad.js";
 
 const router = Router();
 
@@ -25,6 +25,36 @@ router.post(
   body("token").isString().notEmpty(),
   validar,
   enable2FA
+);
+
+router.get(
+  "/roles",
+  requireAuth,
+  requirePermission("seguridad.roles.manage"),
+  listRoles
+);
+
+router.get(
+  "/permisos",
+  requireAuth,
+  requirePermission("seguridad.permisos.manage"),
+  listPermisos
+);
+
+router.get(
+  "/roles/:rolId/permisos",
+  requireAuth,
+  requirePermission("seguridad.permisos.manage"),
+  getPermisosRol
+);
+
+router.post(
+  "/roles/:rolId/permisos",
+  requireAuth,
+  requirePermission("seguridad.permisos.manage"),
+  body("permisos").isArray({ min: 0 }),
+  validar,
+  setPermisosRol
 );
 
 export default router;
