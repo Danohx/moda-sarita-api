@@ -1,27 +1,36 @@
-import mysql from 'mysql2/promise';
-import 'dotenv/config';
+import pg from 'pg';
+import dotenv from "dotenv";
 
-export const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: 4000,
-  ssl: {
-    minVersion: 'TLSv1.2',
-    rejectUnauthorized: true
-  },
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+const { Pool } = pg;
+dotenv.config();
 
-// Prueba rápida de conexión
-pool.getConnection()
-  .then(connection => {
-    pool.releaseConnection(connection);
-    console.log('✅ Conectado a TiDB exitosamente');
+const isProduction = process.env.NODE_ENV === "production";
+
+const connectionConfig = {
+  connectionString: process.env.DATABASE_URL,
+  ssl: isProduction ? { rejectUnauthorized: false } : false
+};
+
+export const pool = new Pool(connectionConfig);
+
+// Eliminar antes de mandar a producción
+if (isProduction) {
+  console.log("🚀 Modo Producción: Conectando a PostgreSQL (SSL Activado).");
+  if (!process.env.DATABASE_URL) {
+    console.error("❌ ERROR CRÍTICO: DATABASE_URL no está definida.");
+  }
+} else {
+  console.log("🏠 Modo Desarrollo: Conectando a PostgreSQL local.");
+}
+// =========================== //
+pool.connect()
+  .then(client => {
+    // Eliminar comentarios
+    console.log(`✅ Conexión exitosa a PostgreSQL (${isProduction ? 'Nube' : 'Local'})`);
+    client.release();
   })
   .catch(err => {
-    console.error('❌ Error conectando a TiDB:', err);
+    // Eliminar primer comentario
+    console.error('❌ Error conectando a la Base de Datos:');
+    console.error(err.message);
   });

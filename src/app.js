@@ -1,35 +1,42 @@
-import express from 'express';
-import cors from 'cors';
-import suscripcionRoutesModule from './routes/suscripcion.routes.js';
+import express from "express";
+import cors from "cors";
 
-const suscripcionRoutes = suscripcionRoutesModule.default ?? suscripcionRoutesModule;
+// RUTAS
+import authRoutes from "./routes/auth.routes.js";
+import securityRoutes from "./routes/security.routes.js";
+import suscripcionRoutes from "./routes/suscripcion.routes.js";
 
 const app = express();
 
+app.set("trust proxy", 1);
+
 const whitelist = [
-  'http://localhost:5173',
-  'https://moda-sarita.com',
-  'https://www.moda-sarita.com',
-  'https://moda-sarita-api.netlify.app'
+  "http://localhost:5173",
+  "https://moda-sarita.com",
+  "https://www.moda-sarita.com",
 ];
 
-// --- 1. Configuraciones (Middlewares) ---
 app.use(express.json());
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || whitelist.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Bloqueado por CORS: Tu origen no tiene permiso.'));
-    }
-  }
-}));
 
-// --- 2. Rutas ---
-app.get('/', (req, res) => res.send('API Moda Sarita v0.1.0 👗'));
-console.log('suscripcionRoutes =', suscripcionRoutes);
-console.log('type:', typeof suscripcionRoutes);
-app.use('/api/suscripcion', suscripcionRoutes);
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
 
-// --- 3. Exportar (NO escuchar) ---
+      if (whitelist.includes(origin))
+        callback(null, true);
+      else
+        callback(new Error("Bloqueado por CORS: Tu origen no tiene permiso."));
+    },
+  })
+);
+
+// Health
+app.get("/", (req, res) => res.send("API Moda Sarita v1.0.0 ✅"));
+
+// ✅ Montaje de rutas
+app.use("/api/auth", authRoutes);
+app.use("/api/security", securityRoutes);
+app.use("/api/suscripcion", suscripcionRoutes);
+
 export default app;

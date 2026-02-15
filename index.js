@@ -1,6 +1,7 @@
 import app from './src/app.js';
 import { SuscripcionModel } from './src/models/suscripcion.model.js';
 import 'dotenv/config';
+import "./src/config/env.js"
 
 const PORT = process.env.PORT || 3000;
 

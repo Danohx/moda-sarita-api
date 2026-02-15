@@ -3,26 +3,34 @@ import { pool } from '../config/db.js';
 export const SuscripcionModel = {
   async init() {
     const sql = `
-      CREATE TABLE IF NOT EXISTS suscripciones (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+      CREATE TABLE IF NOT EXISTS marketing.suscripciones (
+        id SERIAL PRIMARY KEY,
         email VARCHAR(255) NOT NULL UNIQUE,
-        fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        fecha_registro TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       )
     `;
-    await pool.query(sql);
+    try {
+        await pool.query(sql);
+    } catch (error) {
+        console.log("Nota: Asegúrate de que el esquema 'marketing' exista en tu BD");
+    }
   },
 
-  // Guardar un nuevo correo
   async create(email) {
-    const sql = 'INSERT INTO suscripciones (email) VALUES (?)';
-    const [result] = await pool.query(sql, [email]);
-    return result;
+    const sql = 'INSERT INTO marketing.suscripciones (email) VALUES ($1) RETURNING *';
+    const { rows } = await pool.query(sql, [email]);
+    return rows[0];
   },
 
-  // Buscar si ya existe
   async findByEmail(email) {
-    const sql = 'SELECT * FROM suscripciones WHERE email = ?';
-    const [rows] = await pool.query(sql, [email]);
+    const sql = 'SELECT * FROM marketing.suscripciones WHERE email = $1';
+    const { rows } = await pool.query(sql, [email]);
     return rows[0];
+  },
+
+  async findAll() {
+    const sql = 'SELECT email FROM marketing.suscripciones';
+    const { rows } = await pool.query(sql);
+    return rows;
   }
 };
