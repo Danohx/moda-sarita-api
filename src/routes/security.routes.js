@@ -2,6 +2,7 @@ import { Router } from "express";
 import { body, validationResult } from "express-validator";
 import { setup2FA, enable2FA, listRoles, listPermisos, getPermisosRol, setPermisosRol } from "../controllers/security.controller.js";
 import { requireAuth, requirePermission } from "../middleware/seguridad.js";
+import { useInternalDb } from "../middleware/dbContext.js"
 
 const router = Router();
 
@@ -16,6 +17,8 @@ const validar = (req, res, next) => {
   }
   next();
 };
+
+router.use(useInternalDb);
 
 router.post("/2fa/setup", requireAuth, setup2FA);
 

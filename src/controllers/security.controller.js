@@ -1,4 +1,3 @@
-import { pool } from "../config/db.js";
 import { generate2FASecret, verify2FAToken, generate2FASecret as generateSecretLib } from "../middleware/seguridad.js";
 
 export const setup2FA = async (req, res) => {
@@ -8,7 +7,7 @@ export const setup2FA = async (req, res) => {
     try {
         const sql = "UPDATE seguridad.usuarios SET tfa_secret = $1, tfa_enabled = FALSE WHERE email = $2";
         
-        await pool.query(sql, [base32, email]);
+        await req.db.pool(sql, [base32, email]);
         
         res.json({ otpauth_url });
 
@@ -24,7 +23,7 @@ export const enable2FA = async (req, res) => {
 
     try {
         const sql = "SELECT tfa_secret FROM seguridad.usuarios WHERE email = $1";
-        const { rows } = await pool.query(sql, [email]);
+        const { rows } = await req.db.pool(sql, [email]);
 
         if (rows.length === 0) {
             return res.status(404).json({ mensaje: "Usuario no encontrado" });
@@ -40,7 +39,7 @@ export const enable2FA = async (req, res) => {
 
         if (verified) {
             const updateSql = "UPDATE seguridad.usuarios SET tfa_enabled = TRUE WHERE email = $1";
-            await pool.query(updateSql, [email]);
+            await req.db.pool(updateSql, [email]);
             
             res.json({ success: true, message: "2FA habilitado correctamente." });
         } else {
@@ -55,7 +54,7 @@ export const enable2FA = async (req, res) => {
 
 export const listRoles = async (_req, res) => {
   try {
-    const { rows } = await pool.query(
+    const { rows } = await req.db.pool(
       `select id, nombre, descripcion
        from seguridad.roles_sistema
        order by id asc`
@@ -69,7 +68,7 @@ export const listRoles = async (_req, res) => {
 
 export const listPermisos = async (_req, res) => {
   try {
-    const { rows } = await pool.query(
+    const { rows } = await req.db.pool(
       `select slug, nombre_legible, descripcion
        from seguridad.catalogo_permisos
        order by slug asc`
@@ -85,7 +84,7 @@ export const getPermisosRol = async (req, res) => {
   const { rolId } = req.params;
 
   try {
-    const { rows } = await pool.query(
+    const { rows } = await req.db.pool(
       `select ppr.permiso_slug
        from seguridad.permisos_por_rol ppr
        where ppr.rol_id = $1

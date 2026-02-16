@@ -14,6 +14,7 @@ import {
   revokeAllSessions,
   verifySession,
 } from "../controllers/auth.controller.js";
+import { useInternalDb } from "../middleware/dbContext.js"
 import { requireAuth, requirePermission } from "../middleware/seguridad.js";
 
 const router = Router();
@@ -53,6 +54,8 @@ const forgotPasswordLimiter = rateLimit({
   legacyHeaders: false,
   message: { ok: false, msg: "Has superado el límite. Espera 5 minutos." },
 });
+
+router.use(useInternalDb);
 
 router.post(
   "/register",

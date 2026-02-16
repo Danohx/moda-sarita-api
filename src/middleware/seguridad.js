@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import speakeasy from "speakeasy";
-import { pool } from "../config/db.js";
+
 
 export function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -65,6 +65,9 @@ export function verify2FAToken(secret, token) {
 }
 
 export async function requireAuth(req, res, next) {
+  if (!req.db)
+    return res.status(500).json({ message: "DB context no configurado (req.db)" });
+
   try {
     const token =
       req.cookies?.access_token ||
@@ -86,7 +89,7 @@ export async function requireAuth(req, res, next) {
     if (!sid) 
       return res.status(401).json({ message: "Sesión inválida (sin sid)" });
 
-    const sRes = await pool.query(
+    const sRes = await req.db.query(
       `SELECT id, expires_at, revoked_at
       FROM seguridad.user_sessions
       WHERE id = $1 AND user_id = $2`,
@@ -103,7 +106,7 @@ export async function requireAuth(req, res, next) {
     if (new Date(s.expires_at) <= new Date())
       return res.status(401).json({ message: "Sesión expirada" });
 
-    const { rows } = await pool.query(
+    const { rows } = await req.db.query(
       `
       SELECT
         u.id as user_id,

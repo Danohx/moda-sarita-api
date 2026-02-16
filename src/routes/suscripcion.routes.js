@@ -2,6 +2,8 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import { suscribirUsuario, anunciarLanzamiento } from "../controllers/suscripcion.controller.js";
+import { useInternalDb, usePublicDb } from "../middleware/dbContext.js"
+import { requireAuth, requirePermission } from "../middleware/seguridad.js"
 
 const router = Router();
 
@@ -36,11 +38,12 @@ const launchLimiter = rateLimit({
 router.post(
   "/",
   subscribeLimiter,
+  usePublicDb,
   body("email").trim().isEmail().normalizeEmail(),
   validar,
   suscribirUsuario
 );
 
-router.post("/lanzamiento-oficial", launchLimiter, anunciarLanzamiento);
+router.post("/lanzamiento-oficial", useInternalDb, requireAuth, requirePermission("marketing.suscripciones.create"), launchLimiter, anunciarLanzamiento);
 
 export default router;
