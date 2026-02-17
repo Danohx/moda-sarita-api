@@ -47,7 +47,7 @@ export const register = async (req, res) => {
   try {
     const email = correo.toLowerCase();
 
-    const { rows: exists } = await req.db.pool(
+    const { rows: exists } = await req.db.query(
       "SELECT id FROM seguridad.usuarios WHERE email = $1",
       [email]
     );
@@ -58,7 +58,7 @@ export const register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(contrasena, salt);
 
-    const { rows } = await req.db.pool(
+    const { rows } = await req.db.query(
       `INSERT INTO seguridad.usuarios
         (email, password_hash, nombres, apellido_paterno, apellido_materno, tfa_enabled)
        VALUES ($1, $2, $3, $4, $5, false)
@@ -87,7 +87,7 @@ export const login = async (req, res) => {
   try {
     const email = correo.toLowerCase();
 
-    const { rows } = await req.db.pool(
+    const { rows } = await req.db.query(
       `SELECT id, email, password_hash, tfa_secret, tfa_enabled
        FROM seguridad.usuarios
        WHERE email = $1`,
@@ -120,7 +120,7 @@ export const login = async (req, res) => {
     const userAgent = req.headers["user-agent"] || "Unknown";
     const ip = getIp(req);
 
-    await req.db.pool(
+    await req.db.query(
       `INSERT INTO seguridad.user_sessions
         (id, user_id, refresh_token_hash, user_agent, ip_address, expires_at)
        VALUES ($1, $2, $3, $4, $5::inet, $6)`,
@@ -158,7 +158,7 @@ export const verifyLogin2FA = async (req, res) => {
     const userId = decoded.sub;
     const correo = decoded.correo;
 
-    const { rows } = await req.db.pool(
+    const { rows } = await req.db.query(
       `SELECT id, email, tfa_secret, tfa_enabled
        FROM seguridad.usuarios
        WHERE id = $1`,
@@ -184,7 +184,7 @@ export const verifyLogin2FA = async (req, res) => {
     const userAgent = req.headers["user-agent"] || "Unknown";
     const ip = getIp(req);
 
-    await req.db.pool(
+    await req.db.query(
       `INSERT INTO seguridad.user_sessions
         (id, user_id, refresh_token_hash, user_agent, ip_address, expires_at)
        VALUES ($1, $2, $3, $4, $5::inet, $6)`,
@@ -215,7 +215,7 @@ export const sendMagicLink = async (req, res) => {
   try {
     const email = correo.toLowerCase();
 
-    const { rows } = await req.db.pool("SELECT id FROM seguridad.usuarios WHERE email = $1", [email]);
+    const { rows } = await req.db.query("SELECT id FROM seguridad.usuarios WHERE email = $1", [email]);
     if (rows.length === 0) 
       return res.status(404).json({ mensaje: "Usuario no encontrado." });
 
@@ -287,7 +287,7 @@ export const verifyMagicLink = async (req, res) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const email = decoded.correo;
 
-    const { rows } = await req.db.pool(
+    const { rows } = await req.db.query(
       "SELECT id, email, tfa_enabled FROM seguridad.usuarios WHERE email = $1",
       [email.toLowerCase()]
     );
@@ -307,7 +307,7 @@ export const verifyMagicLink = async (req, res) => {
     const refreshHash = hashToken(refreshToken);
 
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    await req.db.pool(
+    await req.db.query(
       `INSERT INTO seguridad.user_sessions
         (id, user_id, refresh_token_hash, user_agent, ip_address, expires_at)
        VALUES ($1, $2, $3, $4, $5::inet, $6)`,
@@ -339,14 +339,14 @@ export const requestPasswordReset = async (req, res) => {
   try {
     const email = correo.toLowerCase();
 
-    const { rows } = await req.db.pool("SELECT id FROM seguridad.usuarios WHERE email = $1", [email]);
+    const { rows } = await req.db.query("SELECT id FROM seguridad.usuarios WHERE email = $1", [email]);
     if (rows.length === 0) 
       return res.json(generic);
 
     const token = crypto.randomBytes(32).toString("hex");
     const expireDate = new Date(Date.now() + 60 * 60 * 1000);
 
-    await req.db.pool(
+    await req.db.query(
       "UPDATE seguridad.usuarios SET reset_token = $1, reset_expires = $2 WHERE email = $3",
       [token, expireDate, email]
     );
@@ -420,7 +420,7 @@ export const resetPassword = async (req, res) => {
   }
 
   try {
-    const { rows } = await req.db.pool(
+    const { rows } = await req.db.query(
       "SELECT id FROM seguridad.usuarios WHERE reset_token = $1 AND reset_expires > now()",
       [token]
     );
@@ -433,13 +433,13 @@ export const resetPassword = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const newHash = await bcrypt.hash(nuevaContrasena, salt);
 
-    await req.db.pool(
+    await req.db.query(
       "UPDATE seguridad.usuarios SET password_hash = $1, reset_token = NULL, reset_expires = NULL WHERE id = $2",
       [newHash, userId]
     );
 
     // revoca sesiones por seguridad
-    await req.db.pool("UPDATE seguridad.user_sessions SET revoked_at = now() WHERE user_id = $1", [userId]);
+    await req.db.query("UPDATE seguridad.user_sessions SET revoked_at = now() WHERE user_id = $1", [userId]);
 
     return res.json({ mensaje: "Contraseña actualizada exitosamente. Ya puedes iniciar sesión." });
   } catch (e) {
@@ -461,7 +461,7 @@ export const refreshSession = async (req, res) => {
 
     const refreshHash = hashToken(refreshToken);
 
-    const { rows: sessions } = await req.db.pool(
+    const { rows: sessions } = await req.db.query(
       `SELECT id, user_id, expires_at, revoked_at
        FROM seguridad.user_sessions
        WHERE id = $1 AND refresh_token_hash = $2`,
@@ -477,7 +477,7 @@ export const refreshSession = async (req, res) => {
     if (new Date(s.expires_at) <= new Date()) 
       return res.status(403).json({ mensaje: "Sesión expirada." });
 
-    const { rows: users } = await req.db.pool(
+    const { rows: users } = await req.db.query(
       "SELECT id, email, tfa_enabled FROM seguridad.usuarios WHERE id = $1",
       [userId]
     );
@@ -506,7 +506,7 @@ export const logout = async (req, res) => {
 
   try {
     const decoded = verifyRefreshToken(refreshToken);
-    await req.db.pool("UPDATE seguridad.user_sessions SET revoked_at = now() WHERE id = $1", [decoded.sid]);
+    await req.db.query("UPDATE seguridad.user_sessions SET revoked_at = now() WHERE id = $1", [decoded.sid]);
   } catch (_) {}
 
   return res.sendStatus(204);
@@ -517,7 +517,7 @@ export const revokeAllSessions = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    await req.db.pool("UPDATE seguridad.user_sessions SET revoked_at = now() WHERE user_id = $1", [userId]);
+    await req.db.query("UPDATE seguridad.user_sessions SET revoked_at = now() WHERE user_id = $1", [userId]);
     return res.json({ mensaje: "Se han cerrado todas las sesiones en todos los dispositivos." });
   } catch (e) {
     console.error("Error revoke all:", e);

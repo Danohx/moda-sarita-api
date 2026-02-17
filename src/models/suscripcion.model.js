@@ -8,7 +8,7 @@ export const SuscripcionModel = {
       )
     `;
     try {
-        await req.db.pool(sql);
+        await req.db.query(sql);
     } catch (error) {
         console.log("Nota: Asegúrate de que el esquema 'marketing' exista en tu BD");
     }
@@ -16,19 +16,19 @@ export const SuscripcionModel = {
 
   async create(email) {
     const sql = 'INSERT INTO marketing.suscripciones (email) VALUES ($1) RETURNING *';
-    const { rows } = await req.db.pool(sql, [email]);
+    const { rows } = await req.db.query(sql, [email]);
     return rows[0];
   },
 
   async findByEmail(email) {
     const sql = 'SELECT * FROM marketing.suscripciones WHERE email = $1';
-    const { rows } = await req.db.pool(sql, [email]);
+    const { rows } = await req.db.query(sql, [email]);
     return rows[0];
   },
 
   async findAll() {
     const sql = 'SELECT email FROM marketing.suscripciones';
-    const { rows } = await req.db.pool(sql);
+    const { rows } = await req.db.query(sql);
     return rows;
   }
 };
