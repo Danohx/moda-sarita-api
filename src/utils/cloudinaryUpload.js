@@ -11,7 +11,7 @@ export function uploadBufferToCloudinary(buffer, { folder, publicId } = {}) {
       (err, result) => {
         if (err) return reject(err);
         resolve(result);
-      }
+      },
     );
 
     stream.end(buffer);

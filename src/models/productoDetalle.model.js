@@ -17,7 +17,7 @@ export async function getProductoDetallePublic(db, productoId) {
     FROM inventario.productos
     WHERE id = $1 AND activo = TRUE
     `,
-    [productoId]
+    [productoId],
   );
 
   if (prodRows.length === 0) return null;
@@ -30,7 +30,7 @@ export async function getProductoDetallePublic(db, productoId) {
     WHERE producto_id = $1
     ORDER BY es_principal DESC, orden ASC, created_at ASC
     `,
-    [productoId]
+    [productoId],
   );
 
   const { rows: variantes } = await db.query(
@@ -61,20 +61,34 @@ export async function getProductoDetallePublic(db, productoId) {
       AND p.activo = TRUE
     ORDER BY t.nombre NULLS LAST, c.nombre NULLS LAST
     `,
-    [productoId]
+    [productoId],
   );
 
   const tallasMap = new Map();
   const coloresMap = new Map();
 
   for (const v of variantes) {
-    if (v.talla_id) tallasMap.set(v.talla_id, { id: v.talla_id, nombre: v.talla_nombre, tipo: v.talla_tipo });
-    if (v.color_id) coloresMap.set(v.color_id, { id: v.color_id, nombre: v.color_nombre, hex: v.color_hex });
+    if (v.talla_id)
+      tallasMap.set(v.talla_id, {
+        id: v.talla_id,
+        nombre: v.talla_nombre,
+        tipo: v.talla_tipo,
+      });
+    if (v.color_id)
+      coloresMap.set(v.color_id, {
+        id: v.color_id,
+        nombre: v.color_nombre,
+        hex: v.color_hex,
+      });
   }
 
   const options = {
-    tallas: Array.from(tallasMap.values()).sort((a, b) => String(a.nombre).localeCompare(String(b.nombre))),
-    colores: Array.from(coloresMap.values()).sort((a, b) => String(a.nombre).localeCompare(String(b.nombre))),
+    tallas: Array.from(tallasMap.values()).sort((a, b) =>
+      String(a.nombre).localeCompare(String(b.nombre)),
+    ),
+    colores: Array.from(coloresMap.values()).sort((a, b) =>
+      String(a.nombre).localeCompare(String(b.nombre)),
+    ),
   };
 
   return { producto, imagenes, variantes, options };

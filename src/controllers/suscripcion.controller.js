@@ -1,20 +1,22 @@
-import { SuscripcionModel } from '../models/suscripcion.model.js';
-import { enviarCorreo } from '../config/mailer.config.js';
+import { SuscripcionModel } from "../models/suscripcion.model.js";
+import { enviarCorreo } from "../config/mailer.config.js";
 
 export const suscribirUsuario = async (req, res) => {
   const { email } = req.body;
-  
-  const emailNorm = String(email || "").trim().toLowerCase();
+
+  const emailNorm = String(email || "")
+    .trim()
+    .toLowerCase();
   if (!emailNorm.match(/^\S+@\S+\.\S+$/)) {
-    return res.status(400).json({ ok:false, msg:"Email inválido" });
+    return res.status(400).json({ ok: false, msg: "Email inválido" });
   }
 
   try {
     const existe = await SuscripcionModel.findByEmail(emailNorm);
     if (existe) {
-      return res.status(400).json({ 
-        ok: false, 
-        msg: 'Este correo ya está registrado en nuestra lista.' 
+      return res.status(400).json({
+        ok: false,
+        msg: "Este correo ya está registrado en nuestra lista.",
       });
     }
 
@@ -68,29 +70,36 @@ export const suscribirUsuario = async (req, res) => {
         </div>
       </div>
     `;
-    
-    await enviarCorreo(emailNorm, '¡Bienvenido a la familia! 💎', htmlBienvenida);
 
-    res.status(201).json({ 
-      ok: true, 
-      msg: '¡Gracias! Te hemos enviado un correo de confirmación.' 
+    await enviarCorreo(
+      emailNorm,
+      "¡Bienvenido a la familia! 💎",
+      htmlBienvenida,
+    );
+
+    res.status(201).json({
+      ok: true,
+      msg: "¡Gracias! Te hemos enviado un correo de confirmación.",
     });
-
   } catch (error) {
-    console.error('Error en suscripción:', error);
+    console.error("Error en suscripción:", error);
     if (error.code === "23505") {
-      return res.status(400).json({ ok:false, msg:"Este correo ya está registrado." });
+      return res
+        .status(400)
+        .json({ ok: false, msg: "Este correo ya está registrado." });
     }
-    res.status(500).json({ 
-      ok: false, 
-      msg: 'Hubo un error al procesar tu solicitud.' 
+    res.status(500).json({
+      ok: false,
+      msg: "Hubo un error al procesar tu solicitud.",
     });
   }
 };
 
 export const anunciarLanzamiento = async (req, res) => {
   if (!process.env.ADMIN_SECRET_KEY) {
-    return res.status(500).json({ ok: false, msg: "Falta ADMIN_SECRET_KEY en .env" });
+    return res
+      .status(500)
+      .json({ ok: false, msg: "Falta ADMIN_SECRET_KEY en .env" });
   }
 
   const adminSecret = req.headers["x-admin-secret"];
@@ -102,7 +111,10 @@ export const anunciarLanzamiento = async (req, res) => {
     const suscriptores = await SuscripcionModel.findAll();
 
     if (suscriptores.length === 0) {
-      return res.json({ ok: true, msg: "No hay suscriptores a quien enviar correo." });
+      return res.json({
+        ok: true,
+        msg: "No hay suscriptores a quien enviar correo.",
+      });
     }
 
     console.log(`📢 Iniciando envío a ${suscriptores.length} personas...`);
@@ -123,8 +135,8 @@ export const anunciarLanzamiento = async (req, res) => {
       enviarCorreo(
         String(sub.email).trim().toLowerCase(),
         "¡YA ABRIMOS! 💎 Gran Estreno Moda Sarita",
-        htmlLanzamiento
-      )
+        htmlLanzamiento,
+      ),
     );
 
     await Promise.all(envios);
@@ -135,6 +147,8 @@ export const anunciarLanzamiento = async (req, res) => {
     });
   } catch (error) {
     console.error("Error en lanzamiento:", error);
-    return res.status(500).json({ ok: false, msg: "Error enviando correos masivos" });
+    return res
+      .status(500)
+      .json({ ok: false, msg: "Error enviando correos masivos" });
   }
 };

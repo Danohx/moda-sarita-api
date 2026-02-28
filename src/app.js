@@ -10,6 +10,12 @@ import tallasRoutes from "./routes/tallas.routes.js";
 import coloresRoutes from "./routes/colores.routes.js";
 import variantesRoutes from "./routes/variantes.routes.js";
 import productosRoutes from "./routes/productos.routes.js";
+import inventarioRoutes from "./routes/inventario.routes.js";
+import proveedoresRoutes from "./routes/proveedores.routes.js";
+import clientesRoutes from "./routes/clientes.routes.js";
+import cuponesRoutes from "./routes/cupones.routes.js";
+import ventasRoutes from "./routes/ventas.routes.js";
+import dashboardRoutes from "./routes/dashboard.routes.js";
 
 const app = express();
 
@@ -28,12 +34,11 @@ app.use(
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
 
-      if (whitelist.includes(origin))
-        callback(null, true);
+      if (whitelist.includes(origin)) callback(null, true);
       else
         callback(new Error("Bloqueado por CORS: Tu origen no tiene permiso."));
     },
-  })
+  }),
 );
 
 // Health
@@ -47,6 +52,14 @@ app.use("/api/categorias", categoriasRoutes);
 app.use("/api/tallas", tallasRoutes);
 app.use("/api/colores", coloresRoutes);
 app.use("/api/variantes", variantesRoutes);
-app.use("/api/productos", productosRoutes)
+app.use("/api/productos", productosRoutes);
+app.use("/api/inventario", inventarioRoutes);
+app.use("/api/proveedores", proveedoresRoutes);
+app.use("/api/clientes", clientesRoutes);
+app.use("/api/cupones", cuponesRoutes);
+app.use("/api/ventas", ventasRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 export default app;
+
+

@@ -1,4 +1,7 @@
-export async function listTallas(db, { includeInactive = false, tipo = null } = {}) {
+export async function listTallas(
+  db,
+  { includeInactive = false, tipo = null } = {},
+) {
   const sql = `
     SELECT id, nombre, tipo, activo
     FROM inventario.tallas

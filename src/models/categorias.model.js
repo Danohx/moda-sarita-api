@@ -1,4 +1,7 @@
-export async function listCategoriasPublicas(db, { includeInactive = false } = {}) {
+export async function listCategoriasPublicas(
+  db,
+  { includeInactive = false } = {},
+) {
   const sql = `
     SELECT id, nombre, descripcion, parent_id, slug, activo
     FROM inventario.categorias
@@ -19,7 +22,10 @@ export async function getCategoriaByIdInterna(id) {
   return rows[0] || null;
 }
 
-export async function createCategoriaInterna(db, { nombre, descripcion, parent_id, slug }) {
+export async function createCategoriaInterna(
+  db,
+  { nombre, descripcion, parent_id, slug },
+) {
   const sql = `
     INSERT INTO inventario.categorias (nombre, descripcion, parent_id, slug, activo)
     VALUES ($1, $2, $3, $4, true)
@@ -34,7 +40,11 @@ export async function createCategoriaInterna(db, { nombre, descripcion, parent_i
   return rows[0];
 }
 
-export async function updateCategoriaInterna(db, id, { nombre, descripcion, parent_id, slug }) {
+export async function updateCategoriaInterna(
+  db,
+  id,
+  { nombre, descripcion, parent_id, slug },
+) {
   const sql = `
     UPDATE inventario.categorias
     SET

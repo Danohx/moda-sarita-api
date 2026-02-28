@@ -1,4 +1,7 @@
-export async function adjustStockVariante(db, { varianteId, usuarioId, cantidad, motivo }) {
+export async function adjustStockVariante(
+  db,
+  { varianteId, usuarioId, cantidad, motivo },
+) {
   const client = await db.connect();
   try {
     await client.query("BEGIN");
@@ -6,7 +9,7 @@ export async function adjustStockVariante(db, { varianteId, usuarioId, cantidad,
     await client.query(
       `INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo)
        VALUES ($1, $2, $3, $4)`,
-      [varianteId, usuarioId, cantidad, motivo]
+      [varianteId, usuarioId, cantidad, motivo],
     );
 
     const { rows } = await client.query(
@@ -16,7 +19,7 @@ export async function adjustStockVariante(db, { varianteId, usuarioId, cantidad,
       WHERE id = $1
         AND (stock_fisico + $2) >= 0
       RETURNING id, stock_fisico`,
-      [varianteId, cantidad]
+      [varianteId, cantidad],
     );
 
     if (rows.length === 0) {
@@ -129,7 +132,7 @@ export async function updateVariante(db, id, payload) {
       `SELECT id, producto_id, talla_id, color_id, sku, codigo_barras, precio_venta, precio_costo, activo, updated_at
        FROM inventario.variantes_producto
        WHERE id = $1`,
-      [id]
+      [id],
     );
     return rows[0] || null;
   }

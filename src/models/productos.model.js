@@ -1,4 +1,7 @@
-export async function listProductosPublic(db, { q = null, categoriaId = null, destacado = null } = {}) {
+export async function listProductosPublic(
+  db,
+  { q = null, categoriaId = null, destacado = null } = {},
+) {
   const sql = `
     SELECT
       p.id,
@@ -159,7 +162,7 @@ export async function setProductoStatus(db, id, activo) {
      SET activo = $2
      WHERE id = $1
      RETURNING id, nombre, activo`,
-    [id, activo]
+    [id, activo],
   );
   return rows[0] || null;
 }
@@ -170,7 +173,7 @@ export async function setProductoDestacado(db, id, destacado) {
      SET destacado = $2
      WHERE id = $1
      RETURNING id, nombre, destacado`,
-    [id, destacado]
+    [id, destacado],
   );
   return rows[0] || null;
 }

@@ -14,7 +14,7 @@ import {
   revokeAllSessions,
   verifySession,
 } from "../controllers/auth.controller.js";
-import { useInternalDb } from "../middleware/dbContext.js"
+import { useInternalDb } from "../middleware/dbContext.js";
 import { requireAuth, requirePermission } from "../middleware/seguridad.js";
 
 const router = Router();
@@ -59,12 +59,18 @@ router.use(useInternalDb);
 
 router.post(
   "/register",
-  body("nombre").trim().notEmpty().matches(/^[a-zA-ZÁ-ÿ\u00f1\u00d1\s]+$/),
-  body("apellidoPaterno").trim().notEmpty().matches(/^[a-zA-ZÁ-ÿ\u00f1\u00d1\s]+$/),
+  body("nombre")
+    .trim()
+    .notEmpty()
+    .matches(/^[a-zA-ZÁ-ÿ\u00f1\u00d1\s]+$/),
+  body("apellidoPaterno")
+    .trim()
+    .notEmpty()
+    .matches(/^[a-zA-ZÁ-ÿ\u00f1\u00d1\s]+$/),
   body("correo").trim().isEmail().normalizeEmail(),
   body("contrasena").isString().isLength({ min: 8 }),
   validar,
-  register
+  register,
 );
 
 router.post(
@@ -73,7 +79,7 @@ router.post(
   body("correo").trim().isEmail().normalizeEmail(),
   body("contrasena").isString().notEmpty(),
   validar,
-  login
+  login,
 );
 
 router.post(
@@ -81,14 +87,14 @@ router.post(
   magicLinkLimiter,
   body("correo").trim().isEmail().normalizeEmail(),
   validar,
-  sendMagicLink
+  sendMagicLink,
 );
 
 router.post(
   "/magic-verify",
   body("token").isString().notEmpty(),
   validar,
-  verifyMagicLink
+  verifyMagicLink,
 );
 
 router.post(
@@ -96,7 +102,7 @@ router.post(
   body("tempToken").isString().notEmpty(),
   body("otpCode").isString().notEmpty(),
   validar,
-  verifyLogin2FA
+  verifyLogin2FA,
 );
 
 router.post(
@@ -104,7 +110,7 @@ router.post(
   forgotPasswordLimiter,
   body("correo").trim().isEmail().normalizeEmail(),
   validar,
-  requestPasswordReset
+  requestPasswordReset,
 );
 
 router.post(
@@ -112,21 +118,21 @@ router.post(
   body("token").isString().notEmpty(),
   body("nuevaContrasena").isString().isLength({ min: 8 }),
   validar,
-  resetPassword
+  resetPassword,
 );
 
 router.post(
   "/refresh-token",
   body("refreshToken").isString().notEmpty(),
   validar,
-  refreshSession
+  refreshSession,
 );
 
 router.post(
   "/logout",
   body("refreshToken").optional().isString(),
   validar,
-  logout
+  logout,
 );
 
 router.post("/revoke-all", requireAuth, revokeAllSessions);
@@ -145,10 +151,9 @@ router.get(
     res.json({
       ok: true,
       mensaje: "Tienes permiso seguridad.roles.manage",
-      user: req.user
+      user: req.user,
     });
-  }
+  },
 );
-
 
 export default router;
