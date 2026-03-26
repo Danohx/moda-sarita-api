@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { usePublicDb, useInternalDb } from "../middleware/dbContext.js";
 import { requireAuth, requireRole } from "../middleware/seguridad.js";
-import { getTallas, postTalla, patchTalla, patchTallaStatus } from "../controllers/tallas.controller.js";
+import { getTallas, postTalla, patchTalla, patchTallaStatus, getTallasAdmin } from "../controllers/tallas.controller.js";
 
 const router = Router();
 
 router.get("/", usePublicDb, getTallas);
+router.get("/admin/list", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), getTallasAdmin);
 
 router.post("/", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), postTalla);
 router.patch("/:id", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), patchTalla);

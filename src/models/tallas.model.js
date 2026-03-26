@@ -13,6 +13,17 @@ export async function listTallas(
   return rows;
 }
 
+export async function listTallasAdmin(db, { tipo = null } = {}) {
+  const sql = `
+    SELECT id, nombre, tipo, activo
+    FROM inventario.tallas
+    WHERE ($1::text IS NULL OR tipo = $1)
+    ORDER BY COALESCE(tipo, ''), nombre;
+  `;
+  const { rows } = await db.query(sql, [tipo]);
+  return rows;
+}
+
 export async function createTalla(db, { nombre, tipo }) {
   const sql = `
     INSERT INTO inventario.tallas (nombre, tipo, activo)

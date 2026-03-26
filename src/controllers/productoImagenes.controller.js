@@ -41,7 +41,6 @@ export async function postProductoImagen(req, res) {
       productoId,
       publicId,
       url,
-      orden: 0,
       esPrincipal: false,
     });
 

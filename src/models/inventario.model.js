@@ -16,13 +16,13 @@ export async function listExistencias(
     params.push(`%${q}%`, `%${q}%`, `%${q}%`);
     where += ` AND (
       p.nombre ILIKE $${i++}
-      OR COALESCE(v.sku, p.sku) ILIKE $${i++}
-      OR COALESCE(v.codigo_barras, p.codigo_barras) ILIKE $${i++}
+      OR v.sku ILIKE $${i++}
+      OR COALESCE(v.codigo_barras, '') ILIKE $${i++}
     )`;
   }
 
   if (soloBajoStock) {
-    where += ` AND (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(p.stock_minimo, 0))`;
+    where += ` AND (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(v.stock_minimo, 0))`;
   }
 
   params.push(limit);
@@ -34,24 +34,31 @@ export async function listExistencias(
       p.id AS producto_id,
       p.nombre AS producto_nombre,
       p.categoria_id,
+      c.nombre AS categoria_nombre,
       v.talla_id,
       t.nombre AS talla_nombre,
+      t.tipo AS talla_tipo,
       v.color_id,
-      c.nombre AS color_nombre,
-      c.hex AS color_hex,
-      COALESCE(v.sku, p.sku) AS sku,
-      COALESCE(v.codigo_barras, p.codigo_barras) AS codigo_barras,
+      c2.nombre AS color_nombre,
+      c2.hex AS color_hex,
+      v.sku,
+      v.codigo_barras,
+      v.precio_venta,
+      v.precio_costo,
       v.stock_fisico,
       v.stock_apartado,
+      v.stock_minimo,
       GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      COALESCE(p.stock_minimo, 0) AS stock_minimo,
-      (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(p.stock_minimo, 0)) AS bajo_stock
+      (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(v.stock_minimo, 0)) AS bajo_stock,
+      v.activo,
+      v.updated_at
     FROM inventario.variantes_producto v
     JOIN inventario.productos p ON p.id = v.producto_id
+    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
     LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c ON c.id = v.color_id
+    LEFT JOIN inventario.colores c2 ON c2.id = v.color_id
     WHERE ${where}
-    ORDER BY p.nombre ASC, t.nombre NULLS LAST, c.nombre NULLS LAST
+    ORDER BY p.nombre ASC, t.nombre NULLS LAST, c2.nombre NULLS LAST
     LIMIT $${i++} OFFSET $${i++};
   `;
 
@@ -66,23 +73,33 @@ export async function getStockByVariante(db, varianteId) {
       v.id AS variante_id,
       v.producto_id,
       p.nombre AS producto_nombre,
+      p.categoria_id,
+      c.nombre AS categoria_nombre,
       v.talla_id,
       t.nombre AS talla_nombre,
+      t.tipo AS talla_tipo,
       v.color_id,
-      c.nombre AS color_nombre,
-      c.hex AS color_hex,
+      c2.nombre AS color_nombre,
+      c2.hex AS color_hex,
+      v.sku,
+      v.codigo_barras,
       v.stock_fisico,
       v.stock_apartado,
+      v.stock_minimo,
       GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      v.activo
+      (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(v.stock_minimo, 0)) AS bajo_stock,
+      v.activo,
+      v.updated_at
     FROM inventario.variantes_producto v
     JOIN inventario.productos p ON p.id = v.producto_id
+    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
     LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c ON c.id = v.color_id
+    LEFT JOIN inventario.colores c2 ON c2.id = v.color_id
     WHERE v.id = $1
     `,
     [varianteId],
   );
+
   return rows[0] || null;
 }
 
@@ -98,6 +115,7 @@ export async function listMovimientosByVariante(
     params.push(from);
     where += ` AND m.fecha >= $${i++}::timestamptz`;
   }
+
   if (to) {
     params.push(to);
     where += ` AND m.fecha <= $${i++}::timestamptz`;
@@ -113,13 +131,20 @@ export async function listMovimientosByVariante(
       m.cantidad,
       m.motivo,
       m.usuario_id,
-      u.email AS usuario_email
+      u.email AS usuario_email,
+      v.id AS variante_id,
+      v.producto_id,
+      p.nombre AS producto_nombre,
+      v.sku
     FROM inventario.movimientos m
+    JOIN inventario.variantes_producto v ON v.id = m.variante_id
+    JOIN inventario.productos p ON p.id = v.producto_id
     LEFT JOIN seguridad.usuarios u ON u.id = m.usuario_id
     WHERE ${where}
-    ORDER BY m.fecha DESC
+    ORDER BY m.fecha DESC, m.id DESC
     LIMIT $${i++} OFFSET $${i++};
   `;
+
   const { rows } = await db.query(sql, params);
   return rows;
 }
@@ -130,12 +155,13 @@ export async function listMovimientosByProducto(
 ) {
   const params = [productoId];
   let i = 2;
-  let where = `m.producto_id = $1`;
+  let where = `v.producto_id = $1`;
 
   if (from) {
     params.push(from);
     where += ` AND m.fecha >= $${i++}::timestamptz`;
   }
+
   if (to) {
     params.push(to);
     where += ` AND m.fecha <= $${i++}::timestamptz`;
@@ -151,14 +177,25 @@ export async function listMovimientosByProducto(
       m.cantidad,
       m.motivo,
       m.variante_id,
+      v.producto_id,
+      v.sku,
+      v.codigo_barras,
+      v.talla_id,
+      t.nombre AS talla_nombre,
+      v.color_id,
+      c.nombre AS color_nombre,
       m.usuario_id,
       u.email AS usuario_email
     FROM inventario.movimientos m
+    JOIN inventario.variantes_producto v ON v.id = m.variante_id
+    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
+    LEFT JOIN inventario.colores c ON c.id = v.color_id
     LEFT JOIN seguridad.usuarios u ON u.id = m.usuario_id
     WHERE ${where}
-    ORDER BY m.fecha DESC
+    ORDER BY m.fecha DESC, m.id DESC
     LIMIT $${i++} OFFSET $${i++};
   `;
+
   const { rows } = await db.query(sql, params);
   return rows;
 }
@@ -174,12 +211,18 @@ export async function createMovimientoAndApply(
   }
 
   const client = await db.connect();
+
   try {
     await client.query("BEGIN");
 
     const vRes = await client.query(
       `
-      SELECT v.id, v.producto_id, v.stock_fisico, v.stock_apartado
+      SELECT
+        v.id,
+        v.producto_id,
+        v.stock_fisico,
+        v.stock_apartado,
+        v.stock_minimo
       FROM inventario.variantes_producto v
       WHERE v.id = $1
       FOR UPDATE
@@ -194,7 +237,6 @@ export async function createMovimientoAndApply(
     }
 
     const v = vRes.rows[0];
-    const productoId = v.producto_id;
 
     let delta = 0;
     let tipo = accion;
@@ -218,10 +260,10 @@ export async function createMovimientoAndApply(
 
     await client.query(
       `
-      INSERT INTO inventario.movimientos (producto_id, variante_id, usuario_id, cantidad, motivo, tipo)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo, tipo)
+      VALUES ($1, $2, $3, $4, $5)
       `,
-      [productoId, varianteId, usuarioId, delta, motivo, tipo],
+      [varianteId, usuarioId, delta, motivo, tipo],
     );
 
     const uRes = await client.query(
@@ -230,7 +272,14 @@ export async function createMovimientoAndApply(
       SET stock_fisico = stock_fisico + $2,
           updated_at = now()
       WHERE id = $1
-      RETURNING id, producto_id, stock_fisico, stock_apartado
+      RETURNING
+        id,
+        producto_id,
+        stock_fisico,
+        stock_apartado,
+        stock_minimo,
+        activo,
+        updated_at
       `,
       [varianteId, delta],
     );

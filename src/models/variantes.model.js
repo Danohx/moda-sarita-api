@@ -1,33 +1,109 @@
+export async function getVarianteById(db, id) {
+  const sql = `
+    SELECT
+      v.id,
+      v.producto_id,
+      p.nombre AS producto_nombre,
+      v.talla_id,
+      t.nombre AS talla_nombre,
+      t.tipo AS talla_tipo,
+      v.color_id,
+      c.nombre AS color_nombre,
+      c.hex AS color_hex,
+      v.sku,
+      v.codigo_barras,
+      v.precio_venta,
+      v.precio_costo,
+      v.stock_fisico,
+      v.stock_apartado,
+      v.stock_minimo,
+      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
+      v.activo,
+      v.created_at,
+      v.updated_at
+    FROM inventario.variantes_producto v
+    JOIN inventario.productos p ON p.id = v.producto_id
+    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
+    LEFT JOIN inventario.colores c ON c.id = v.color_id
+    WHERE v.id = $1
+  `;
+
+  const { rows } = await db.query(sql, [id]);
+  return rows[0] || null;
+}
+
 export async function adjustStockVariante(
   db,
   { varianteId, usuarioId, cantidad, motivo },
 ) {
   const client = await db.connect();
+
   try {
     await client.query("BEGIN");
 
-    await client.query(
-      `INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo)
-       VALUES ($1, $2, $3, $4)`,
-      [varianteId, usuarioId, cantidad, motivo],
+    const { rows: found } = await client.query(
+      `
+      SELECT
+        v.id,
+        v.stock_fisico,
+        v.stock_apartado,
+        v.stock_minimo
+      FROM inventario.variantes_producto v
+      WHERE v.id = $1
+      FOR UPDATE
+      `,
+      [varianteId],
     );
 
-    const { rows } = await client.query(
-      `UPDATE inventario.variantes_producto
-      SET stock_fisico = stock_fisico + $2,
-          updated_at = now()
-      WHERE id = $1
-        AND (stock_fisico + $2) >= 0
-      RETURNING id, stock_fisico`,
-      [varianteId, cantidad],
-    );
-
-    if (rows.length === 0) {
-      throw new Error("Variante no encontrada o stock insuficiente");
+    if (found.length === 0) {
+      const err = new Error("Variante no encontrada");
+      err.code = "NOT_FOUND";
+      throw err;
     }
 
+    const actual = Number(found[0].stock_fisico);
+    const nuevo = actual + Number(cantidad);
+
+    if (nuevo < 0) {
+      const err = new Error("Stock insuficiente");
+      err.code = "STOCK_NEGATIVO";
+      throw err;
+    }
+
+    const { rows: updatedRows } = await client.query(
+      `
+      UPDATE inventario.variantes_producto
+      SET stock_fisico = $2,
+          updated_at = now()
+      WHERE id = $1
+      RETURNING
+        id,
+        producto_id,
+        stock_fisico,
+        stock_apartado,
+        stock_minimo,
+        activo,
+        updated_at
+      `,
+      [varianteId, nuevo],
+    );
+
+    await client.query(
+      `
+      INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo, tipo)
+      VALUES ($1, $2, $3, $4, $5)
+      `,
+      [
+        varianteId,
+        usuarioId,
+        cantidad,
+        motivo,
+        cantidad > 0 ? "ENTRADA" : "SALIDA",
+      ],
+    );
+
     await client.query("COMMIT");
-    return rows[0];
+    return updatedRows[0];
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -49,10 +125,15 @@ export async function listVariantesByProductoPublic(db, productoId) {
       c.hex AS color_hex,
       v.sku,
       v.codigo_barras,
-      COALESCE(v.precio_venta, p.precio_venta) AS precio_venta,
-      v.activo,
+      v.precio_venta,
+      v.precio_costo,
       v.stock_fisico,
-      v.stock_apartado
+      v.stock_apartado,
+      v.stock_minimo,
+      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
+      v.activo,
+      v.created_at,
+      v.updated_at
     FROM inventario.variantes_producto v
     JOIN inventario.productos p ON p.id = v.producto_id
     LEFT JOIN inventario.tallas t ON t.id = v.talla_id
@@ -60,8 +141,49 @@ export async function listVariantesByProductoPublic(db, productoId) {
     WHERE v.producto_id = $1
       AND v.activo = TRUE
       AND p.activo = TRUE
-    ORDER BY t.nombre NULLS LAST, c.nombre NULLS LAST;
+    ORDER BY t.nombre NULLS LAST, c.nombre NULLS LAST, v.created_at ASC;
   `;
+
+  const { rows } = await db.query(sql, [productoId]);
+  return rows;
+}
+
+export async function listVariantesByProductoAdmin(db, productoId){
+  const sql = `
+    SELECT
+      v.id,
+      v.producto_id,
+      v.talla_id,
+      t.nombre AS talla_nombre,
+      t.tipo AS talla_tipo,
+      v.color_id,
+      c.nombre AS color_nombre,
+      c.hex AS color_hex,
+      v.sku,
+      v.codigo_barras,
+      v.precio_venta,
+      v.precio_costo,
+      v.stock_fisico,
+      v.stock_apartado,
+      v.stock_minimo,
+      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
+      v.activo,
+      v.created_at,
+      v.updated_at
+    FROM inventario.variantes_producto v
+    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
+    LEFT JOIN inventario.colores c ON c.id = v.color_id
+    WHERE v.producto_id = $1
+    ORDER BY
+    CASE
+      WHEN v.talla_id IS NULL AND v.color_id IS NULL THEN 0
+      ELSE 1
+    END,
+    t.nombre NULLS LAST,
+    c.nombre NULLS LAST,
+    v.created_at ASC
+  `;
+
   const { rows } = await db.query(sql, [productoId]);
   return rows;
 }
@@ -71,25 +193,50 @@ export async function createVariante(db, payload) {
     producto_id,
     talla_id = null,
     color_id = null,
-    sku = null,
+    sku,
     codigo_barras = null,
-    precio_venta = null,
+    precio_venta,
     precio_costo = null,
     stock_fisico = 0,
     stock_apartado = 0,
+    stock_minimo = 5,
     activo = true,
   } = payload;
 
   const sql = `
     INSERT INTO inventario.variantes_producto
-      (producto_id, talla_id, color_id, sku, codigo_barras, precio_venta, precio_costo,
-       stock_fisico, stock_apartado, activo)
+      (
+        producto_id,
+        talla_id,
+        color_id,
+        sku,
+        codigo_barras,
+        precio_venta,
+        precio_costo,
+        stock_fisico,
+        stock_apartado,
+        stock_minimo,
+        activo
+      )
     VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
     RETURNING
-      id, producto_id, talla_id, color_id, sku, codigo_barras, precio_venta, precio_costo,
-      stock_fisico, stock_apartado, activo, created_at, updated_at;
+      id,
+      producto_id,
+      talla_id,
+      color_id,
+      sku,
+      codigo_barras,
+      precio_venta,
+      precio_costo,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      activo,
+      created_at,
+      updated_at;
   `;
+
   const { rows } = await db.query(sql, [
     producto_id,
     talla_id,
@@ -100,8 +247,10 @@ export async function createVariante(db, payload) {
     precio_costo,
     stock_fisico,
     stock_apartado,
+    stock_minimo,
     activo,
   ]);
+
   return rows[0];
 }
 
@@ -113,6 +262,7 @@ export async function updateVariante(db, id, payload) {
     "codigo_barras",
     "precio_venta",
     "precio_costo",
+    "stock_minimo",
   ];
 
   const sets = [];
@@ -128,13 +278,7 @@ export async function updateVariante(db, id, payload) {
   }
 
   if (sets.length === 0) {
-    const { rows } = await db.query(
-      `SELECT id, producto_id, talla_id, color_id, sku, codigo_barras, precio_venta, precio_costo, activo, updated_at
-       FROM inventario.variantes_producto
-       WHERE id = $1`,
-      [id],
-    );
-    return rows[0] || null;
+    return await getVarianteById(db, id);
   }
 
   const sql = `
@@ -143,7 +287,21 @@ export async function updateVariante(db, id, payload) {
       ${sets.join(", ")},
       updated_at = now()
     WHERE id = $1
-    RETURNING id, producto_id, talla_id, color_id, sku, codigo_barras, precio_venta, precio_costo, activo, updated_at;
+    RETURNING
+      id,
+      producto_id,
+      talla_id,
+      color_id,
+      sku,
+      codigo_barras,
+      precio_venta,
+      precio_costo,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      activo,
+      created_at,
+      updated_at;
   `;
 
   const { rows } = await db.query(sql, values);
@@ -151,12 +309,65 @@ export async function updateVariante(db, id, payload) {
 }
 
 export async function setVarianteStatus(db, id, activo) {
-  const sql = `
-    UPDATE inventario.variantes_producto
-    SET activo = $2, updated_at = now()
-    WHERE id = $1
-    RETURNING id, producto_id, activo;
-  `;
-  const { rows } = await db.query(sql, [id, activo]);
-  return rows[0] || null;
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const { rows: found } = await client.query(
+      `
+      SELECT id, producto_id, activo
+      FROM inventario.variantes_producto
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [id]
+    );
+
+    if (found.length === 0) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const variante = found[0];
+
+    if (activo === false) {
+      const { rows: activeRows } = await client.query(
+        `
+        SELECT COUNT(*)::int AS total
+        FROM inventario.variantes_producto
+        WHERE producto_id = $1
+          AND activo = TRUE
+        `,
+        [variante.producto_id]
+      );
+
+      const totalActivas = Number(activeRows[0]?.total || 0);
+
+      if (variante.activo === true && totalActivas <= 1) {
+        const err = new Error("No puedes desactivar la última variante activa del producto");
+        err.code = "LAST_ACTIVE_VARIANT";
+        throw err;
+      }
+    }
+
+    const { rows } = await client.query(
+      `
+      UPDATE inventario.variantes_producto
+      SET activo = $2,
+          updated_at = now()
+      WHERE id = $1
+      RETURNING id, producto_id, activo, updated_at;
+      `,
+      [id, activo]
+    );
+
+    await client.query("COMMIT");
+    return rows[0] || null;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }

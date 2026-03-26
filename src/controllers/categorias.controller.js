@@ -1,6 +1,7 @@
 // src/controllers/categorias.controller.js
 import {
   listCategoriasPublicas,
+  listCategoriasAdmin,
   createCategoriaInterna,
   updateCategoriaInterna,
   setCategoriaStatusInterna,
@@ -15,6 +16,27 @@ export async function getCategorias(req, res) {
 
     const includeInactive = req.query.includeInactive === "true";
     const data = await listCategoriasPublicas(req.db, { includeInactive });
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        message: "Error listando categorías",
+        detail: err.message,
+      });
+  }
+}
+
+export async function getCategoriasAdmin(req, res) {
+  try {
+    if (!req.db)
+      return res
+        .status(500)
+        .json({ message: "DB context no configurado (req.db)" });
+
+    const data = await listCategoriasAdmin(req.db);
     return res.json({ ok: true, data });
   } catch (err) {
     console.error(err);

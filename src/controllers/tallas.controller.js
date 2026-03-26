@@ -3,6 +3,7 @@ import {
   createTalla,
   updateTalla,
   setTallaStatus,
+  listTallasAdmin,
 } from "../models/tallas.model.js";
 
 export async function getTallas(req, res) {
@@ -16,6 +17,25 @@ export async function getTallas(req, res) {
     const tipo = req.query.tipo ? String(req.query.tipo) : null;
 
     const data = await listTallas(req.db, { includeInactive, tipo });
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("getTallas error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, msg: "Error listando tallas", detail: err.message });
+  }
+}
+
+export async function getTallasAdmin(req, res) {
+  try {
+    if (!req.db)
+      return res
+        .status(500)
+        .json({ ok: false, msg: "DB context no configurado (req.db)" });
+
+    const tipo = req.query.tipo ? String(req.query.tipo) : null;
+
+    const data = await listTallasAdmin(req.db, { tipo });
     return res.json({ ok: true, data });
   } catch (err) {
     console.error("getTallas error:", err);

@@ -24,9 +24,11 @@ export async function getExistencias(req, res) {
     if (categoriaId !== null && !Number.isInteger(categoriaId)) {
       return res.status(400).json({ ok: false, msg: "categoriaId inválido" });
     }
+
     if (limit <= 0 || limit > 200) {
       return res.status(400).json({ ok: false, msg: "limit inválido (1-200)" });
     }
+
     if (offset < 0) {
       return res.status(400).json({ ok: false, msg: "offset inválido" });
     }
@@ -38,16 +40,15 @@ export async function getExistencias(req, res) {
       limit,
       offset,
     });
+
     return res.json({ ok: true, data });
   } catch (err) {
     console.error("getExistencias error:", err);
-    return res
-      .status(500)
-      .json({
-        ok: false,
-        msg: "Error listando existencias",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error listando existencias",
+      detail: err.message,
+    });
   }
 }
 
@@ -55,8 +56,11 @@ export async function getStockVariante(req, res) {
   try {
     const varianteId = String(req.params.id);
     const data = await getStockByVariante(req.db, varianteId);
-    if (!data)
+
+    if (!data) {
       return res.status(404).json({ ok: false, msg: "Variante no encontrada" });
+    }
+
     return res.json({ ok: true, data });
   } catch (err) {
     console.error("getStockVariante error:", err);
@@ -76,8 +80,10 @@ export async function getKardexVariante(req, res) {
     if (limit <= 0 || limit > 500) {
       return res.status(400).json({ ok: false, msg: "limit inválido (1-500)" });
     }
-    if (offset < 0)
+
+    if (offset < 0) {
       return res.status(400).json({ ok: false, msg: "offset inválido" });
+    }
 
     const data = await listMovimientosByVariante(req.db, {
       varianteId,
@@ -86,16 +92,15 @@ export async function getKardexVariante(req, res) {
       limit,
       offset,
     });
+
     return res.json({ ok: true, data });
   } catch (err) {
     console.error("getKardexVariante error:", err);
-    return res
-      .status(500)
-      .json({
-        ok: false,
-        msg: "Error listando movimientos",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error listando movimientos",
+      detail: err.message,
+    });
   }
 }
 
@@ -109,8 +114,10 @@ export async function getKardexProducto(req, res) {
     if (limit <= 0 || limit > 500) {
       return res.status(400).json({ ok: false, msg: "limit inválido (1-500)" });
     }
-    if (offset < 0)
+
+    if (offset < 0) {
       return res.status(400).json({ ok: false, msg: "offset inválido" });
+    }
 
     const data = await listMovimientosByProducto(req.db, {
       productoId,
@@ -119,16 +126,15 @@ export async function getKardexProducto(req, res) {
       limit,
       offset,
     });
+
     return res.json({ ok: true, data });
   } catch (err) {
     console.error("getKardexProducto error:", err);
-    return res
-      .status(500)
-      .json({
-        ok: false,
-        msg: "Error listando movimientos",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error listando movimientos",
+      detail: err.message,
+    });
   }
 }
 
@@ -141,17 +147,17 @@ export async function postMovimientoInventario(req, res) {
     const varianteId = variante_id ? String(variante_id) : null;
 
     if (!a || !["ENTRADA", "SALIDA", "AJUSTE", "SET_STOCK"].includes(a)) {
-      return res
-        .status(400)
-        .json({
-          ok: false,
-          msg: "accion inválida (ENTRADA|SALIDA|AJUSTE|SET_STOCK)",
-        });
+      return res.status(400).json({
+        ok: false,
+        msg: "accion inválida (ENTRADA|SALIDA|AJUSTE|SET_STOCK)",
+      });
     }
-    if (!varianteId)
+
+    if (!varianteId) {
       return res
         .status(400)
         .json({ ok: false, msg: "variante_id es requerido" });
+    }
 
     const mot = motivo ? String(motivo).trim() : "";
     if (mot.length < 3) {
@@ -180,19 +186,19 @@ export async function postMovimientoInventario(req, res) {
       }
 
       if (a === "ENTRADA") {
-        if (c < 0)
+        if (c < 0) {
           return res
             .status(400)
             .json({ ok: false, msg: "ENTRADA requiere cantidad positiva" });
+        }
         cantidadNum = c;
       } else if (a === "SALIDA") {
-        if (c < 0)
-          return res
-            .status(400)
-            .json({
-              ok: false,
-              msg: "SALIDA requiere cantidad positiva (el sistema la descuenta)",
-            });
+        if (c < 0) {
+          return res.status(400).json({
+            ok: false,
+            msg: "SALIDA requiere cantidad positiva (el sistema la descuenta)",
+          });
+        }
         cantidadNum = -Math.abs(c);
       } else {
         cantidadNum = c;
@@ -215,19 +221,19 @@ export async function postMovimientoInventario(req, res) {
     if (err?.code === "STOCK_NEGATIVO") {
       return res.status(409).json({ ok: false, msg: err.message });
     }
+
     if (err?.code === "NOT_FOUND") {
       return res.status(404).json({ ok: false, msg: err.message });
     }
+
     if (err?.code === "VALIDATION") {
       return res.status(400).json({ ok: false, msg: err.message });
     }
 
-    return res
-      .status(500)
-      .json({
-        ok: false,
-        msg: "Error aplicando movimiento",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error aplicando movimiento",
+      detail: err.message,
+    });
   }
 }

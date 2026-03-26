@@ -106,3 +106,57 @@ Este proyecto está pre-configurado para desplegarse como **Serverless Functions
 - **v0.1.0** - Lanzamiento inicial. Endpoint de suscripción, integración con TiDB y plantillas de correo con Resend.
 
 Desarrollado con ❤️ para Moda Sarita.
+```
+moda-sarita-api
+├─ index.js
+├─ package-lock.json
+├─ package.json
+├─ README.md
+├─ src
+│  ├─ app.js
+│  ├─ config
+│  │  ├─ cloudinary.js
+│  │  ├─ db.js
+│  │  ├─ env.js
+│  │  └─ mailer.config.js
+│  ├─ controllers
+│  │  ├─ auth.controller.js
+│  │  ├─ categorias.controller.js
+│  │  ├─ clientes.controller.js
+│  │  ├─ colores.controller.js
+│  │  ├─ cupones.controller.js
+│  │  ├─ dashboard.controller.js
+│  │  ├─ inventario.controller.js
+│  │  ├─ productoDetalle.controller.js
+│  │  ├─ productoImagenes.controller.js
+│  │  ├─ productos.controller.js
+│  │  ├─ proveedores.controller.js
+│  │  ├─ security.controller.js
+│  │  ├─ suscripcion.controller.js
+│  │  ├─ tallas.controller.js
+│  │  ├─ variantes.controller.js
+│  │  └─ ventas.controller.js
+│  ├─ middleware
+│  │  ├─ dbContext.js
+│  │  ├─ rateLimit.js
+│  │  ├─ seguridad.js
+│  │  └─ upload.js
+│  ├─ models
+│  │  ├─ categorias.model.js
+│  │  ├─ clientes.model.js
+│  │  ├─ colores.model.js
+│  │  ├─ cupones.model.js
+│  │  ├─ inventario.model.js
+│  │  ├─ productoDetalle.model.js
+│  │  ├─ productoImagenes.model.js
+│  │  ├─ productos.model.js
+│  │  ├─ proveedores.model.js
+│  │  ├─ suscripcion.model.js
+│  │  ├─ tallas.model.js
+│  │  ├─ variantes.model.js
+│  │  └─ ventas.model.js
+│  └─ utils
+│     └─ cloudinaryUpload.js
+└─ vercel.json
+
+```

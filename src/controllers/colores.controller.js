@@ -3,6 +3,7 @@ import {
   createColor,
   updateColor,
   setColorStatus,
+  listColoresAdmin,
 } from "../models/colores.model.js";
 
 function isValidHex(hex) {
@@ -20,6 +21,23 @@ export async function getColores(req, res) {
 
     const includeInactive = req.query.includeInactive === "true";
     const data = await listColores(req.db, { includeInactive });
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("getColores error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, msg: "Error listando colores", detail: err.message });
+  }
+}
+
+export async function getColoresAdmin(req, res) {
+  try {
+    if (!req.db)
+      return res
+        .status(500)
+        .json({ ok: false, msg: "DB context no configurado (req.db)" });
+
+    const data = await listColoresAdmin(req.db);
     return res.json({ ok: true, data });
   } catch (err) {
     console.error("getColores error:", err);

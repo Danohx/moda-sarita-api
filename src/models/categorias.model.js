@@ -12,6 +12,16 @@ export async function listCategoriasPublicas(
   return rows;
 }
 
+export async function listCategoriasAdmin(db) {
+  const sql = `
+    SELECT id, nombre, descripcion, parent_id, slug, activo
+    FROM inventario.categorias
+    ORDER BY COALESCE(parent_id, 0), nombre;
+  `;
+  const { rows } = await db.query(sql);
+  return rows;
+}
+
 export async function getCategoriaByIdInterna(id) {
   const sql = `
     SELECT id, nombre, descripcion, parent_id, slug, activo

@@ -1,13 +1,27 @@
 export async function insertProductoImagen(
   db,
-  { productoId, publicId, url, orden = 0, esPrincipal = false },
+  { productoId, publicId, url, orden, esPrincipal = false },
 ) {
+  let ordenFinal = Number.isInteger(orden) ? orden : null;
+
+  if (ordenFinal === null) {
+    const { rows } = await db.query(
+      `SELECT COALESCE(MAX(orden), -1) + 1 AS next_orden
+       FROM inventario.producto_imagenes
+       WHERE producto_id = $1`,
+      [productoId],
+    );
+
+    ordenFinal = Number(rows[0]?.next_orden ?? 0);
+  }
+
   const { rows } = await db.query(
     `INSERT INTO inventario.producto_imagenes (producto_id, public_id, url, orden, es_principal)
      VALUES ($1, $2, $3, $4, $5)
      RETURNING id, producto_id, public_id, url, orden, es_principal, created_at`,
-    [productoId, publicId, url, orden, esPrincipal],
+    [productoId, publicId, url, ordenFinal, esPrincipal],
   );
+
   return rows[0];
 }
 

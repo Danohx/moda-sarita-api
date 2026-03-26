@@ -23,6 +23,7 @@ app.set("trust proxy", 1);
 
 const whitelist = [
   "http://localhost:5173",
+  "http://localhost:5174",
   "https://moda-sarita.com",
   "https://www.moda-sarita.com",
 ];
@@ -37,7 +38,9 @@ app.use(
       if (whitelist.includes(origin)) callback(null, true);
       else
         callback(new Error("Bloqueado por CORS: Tu origen no tiene permiso."));
+
     },
+    credentials: true,
   }),
 );
 
@@ -61,5 +64,3 @@ app.use("/api/ventas", ventasRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 
 export default app;
-
-

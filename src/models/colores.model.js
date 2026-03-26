@@ -8,6 +8,15 @@ export async function listColores(db, { includeInactive = false } = {}) {
   const { rows } = await db.query(sql, [includeInactive]);
   return rows;
 }
+export async function listColoresAdmin(db) {
+  const sql = `
+    SELECT id, nombre, hex, activo
+    FROM inventario.colores
+    ORDER BY nombre;
+  `;
+  const { rows } = await db.query(sql);
+  return rows;
+}
 
 export async function createColor(db, { nombre, hex }) {
   const sql = `
