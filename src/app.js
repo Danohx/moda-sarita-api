@@ -16,6 +16,10 @@ import clientesRoutes from "./routes/clientes.routes.js";
 import cuponesRoutes from "./routes/cupones.routes.js";
 import ventasRoutes from "./routes/ventas.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
+import monitoringRoutes from "./routes/monitoring.routes.js";
+import backupsRoutes from "./routes/backups.routes.js";
+import maintenanceRoutes from "./routes/maintenance.routes.js";
+import auditLogsRoutes from "./routes/auditLogs.routes.js";
 
 const app = express();
 
@@ -38,7 +42,6 @@ app.use(
       if (whitelist.includes(origin)) callback(null, true);
       else
         callback(new Error("Bloqueado por CORS: Tu origen no tiene permiso."));
-
     },
     credentials: true,
   }),
@@ -62,5 +65,9 @@ app.use("/api/clientes", clientesRoutes);
 app.use("/api/cupones", cuponesRoutes);
 app.use("/api/ventas", ventasRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/monitoring", monitoringRoutes);
+app.use("/api/backups", backupsRoutes);
+app.use("/api/maintenance", maintenanceRoutes);
+app.use("/api/audit-logs", auditLogsRoutes);
 
 export default app;
