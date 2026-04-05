@@ -17,7 +17,7 @@ import cuponesRoutes from "./routes/cupones.routes.js";
 import ventasRoutes from "./routes/ventas.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import monitoringRoutes from "./routes/monitoring.routes.js";
-import backupsRoutes from "./routes/backups.routes.js";
+// import backupsRoutes from "./routes/backups.routes.js";
 import maintenanceRoutes from "./routes/maintenance.routes.js";
 import auditLogsRoutes from "./routes/auditLogs.routes.js";
 
@@ -66,7 +66,7 @@ app.use("/api/cupones", cuponesRoutes);
 app.use("/api/ventas", ventasRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/monitoring", monitoringRoutes);
-app.use("/api/backups", backupsRoutes);
+// app.use("/api/backups", backupsRoutes);
 app.use("/api/maintenance", maintenanceRoutes);
 app.use("/api/audit-logs", auditLogsRoutes);
 
