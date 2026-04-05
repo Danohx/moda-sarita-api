@@ -30,7 +30,7 @@ const whitelist = [
   "http://localhost:5174",
   "https://moda-sarita.com",
   "https://www.moda-sarita.com",
-  "https://moda-sarita-api.vercel.app/"
+  "https://moda-sarita-admin.pages.dev"
 ];
 
 app.use(express.json());
