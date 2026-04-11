@@ -7,6 +7,8 @@ import {
   abrirCorte,
   getCorteAbierto,
   cerrarCorte,
+  getCorteById,
+  getHistorialCortes,
 } from "../models/ventas.model.js";
 
 export async function postVentaPOS(req, res) {
@@ -50,6 +52,9 @@ export async function postApartado(req, res) {
     return res.status(201).json({ ok: true, data: out });
   } catch (err) {
     console.error("postApartado error:", err);
+    if (err.code === "FORBIDDEN") {
+      return res.status(403).json({ ok: false, msg: err.message });
+    }
     if (err.code === "VALIDATION") {
       return res.status(400).json({ ok: false, msg: err.message });
     }
@@ -169,10 +174,29 @@ export async function postAbrirCorte(req, res) {
         .json({ ok: false, msg: "Ya existe un corte abierto", data: actual });
     }
 
-    const out = await abrirCorte(req.db, { usuario_id });
+    const { fondo_inicial = 0 } = req.body || {};
+    const fondoInicialNum = Number(fondo_inicial);
+
+    if (!Number.isFinite(fondoInicialNum) || fondoInicialNum < 0) {
+      return res.status(400).json({
+        ok: false,
+        msg: "fondo_inicial debe ser un número mayor o igual a 0",
+      });
+    }
+
+    const out = await abrirCorte(req.db, {
+      usuario_id,
+      fondo_inicial: fondoInicialNum,
+    });
+
     return res.status(201).json({ ok: true, data: out });
   } catch (err) {
     console.error("postAbrirCorte error:", err);
+
+    if (err.code === "VALIDATION") {
+      return res.status(400).json({ ok: false, msg: err.message });
+    }
+
     return res
       .status(500)
       .json({ ok: false, msg: "Error abriendo corte", detail: err.message });
@@ -221,5 +245,42 @@ export async function postCerrarCorte(req, res) {
     return res
       .status(500)
       .json({ ok: false, msg: "Error cerrando corte", detail: err.message });
+  }
+}
+
+export async function getHistorial(req, res) {
+  try {
+    const out = await getHistorialCortes(req.db);
+    return res.json({ ok: true, data: out });
+  } catch (err) {
+    console.error("getHistorial error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, msg: "Error consultando el historial de cortes", detail: err.message });
+  }
+}
+
+export async function getCorteDetalle(req, res) {
+  try {
+    // Lo convertimos a número tal como lo haces en postCerrarCorte
+    const corte_id = Number(req.params.id);
+
+    if (!Number.isFinite(corte_id)) {
+      return res.status(400).json({ ok: false, msg: "ID de corte inválido" });
+    }
+
+    const out = await getCorteById(req.db, corte_id);
+    
+    return res.json({ ok: true, data: out });
+  } catch (err) {
+    console.error("getCorteDetalle error:", err);
+    
+    if (err.code === "NOT_FOUND") {
+      return res.status(404).json({ ok: false, msg: err.message });
+    }
+    
+    return res
+      .status(500)
+      .json({ ok: false, msg: "Error consultando el detalle del corte", detail: err.message });
   }
 }

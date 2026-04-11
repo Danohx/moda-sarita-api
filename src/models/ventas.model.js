@@ -107,7 +107,6 @@ export async function crearVentaPOS(
 
       normalizedItems.push({
         variante_id: varianteId,
-        producto_id: v.producto_id,
         cantidad,
         precio_unitario,
       });
@@ -131,9 +130,19 @@ export async function crearVentaPOS(
     const pRes = await client.query(
       `
       INSERT INTO ventas.pedidos
-        (cliente_id, vendedor_id, tipo, estado, subtotal, descuento, costo_envio, total, cupon_id)
+        (
+          cliente_id,
+          vendedor_id,
+          tipo,
+          estado,
+          subtotal,
+          descuento,
+          costo_envio,
+          total,
+          cupon_id
+        )
       VALUES
-        ($1,$2,$3,'PENDIENTE',$4,$5,$6,$7,$8)
+        ($1, $2, $3, 'PENDIENTE', $4, $5, $6, $7, $8)
       RETURNING *
       `,
       [
@@ -153,16 +162,10 @@ export async function crearVentaPOS(
     for (const it of normalizedItems) {
       await client.query(
         `
-        INSERT INTO ventas.detalles_pedido (pedido_id, producto_id, variante_id, cantidad, precio_unitario)
-        VALUES ($1,$2,$3,$4,$5)
+        INSERT INTO ventas.detalles_pedido (pedido_id, variante_id, cantidad, precio_unitario)
+        VALUES ($1,$2,$3,$4)
         `,
-        [
-          pedido.id,
-          it.producto_id,
-          it.variante_id,
-          it.cantidad,
-          it.precio_unitario,
-        ],
+        [pedido.id, it.variante_id, it.cantidad, it.precio_unitario],
       );
 
       await client.query(
@@ -241,6 +244,30 @@ export async function crearApartado(
   try {
     await client.query("BEGIN");
 
+    const clienteRes = await client.query(
+      `
+      SELECT id, puede_apartar
+      FROM clientes.clientes
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [cliente_id],
+    );
+
+    const cliente = clienteRes.rows[0];
+
+    if (!cliente) {
+      const e = new Error("Cliente no encontrado");
+      e.code = "NOT_FOUND";
+      throw e;
+    }
+
+    if (!cliente.puede_apartar) {
+      const e = new Error("El cliente no está autorizado para apartados");
+      e.code = "FORBIDDEN";
+      throw e;
+    }
+
     const normalizedItems = [];
 
     for (const it of items) {
@@ -284,7 +311,6 @@ export async function crearApartado(
 
       normalizedItems.push({
         variante_id: varianteId,
-        producto_id: v.producto_id,
         cantidad,
         precio_unitario,
       });
@@ -296,19 +322,39 @@ export async function crearApartado(
     }
 
     const total = toMoney(subtotal);
+    const anticipoNum = toMoney(anticipo ?? 0);
+
+    if (anticipoNum < 0) {
+      const e = new Error("El anticipo no puede ser negativo");
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    if (anticipoNum > total) {
+      const e = new Error("El anticipo no puede ser mayor al total");
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    if (anticipoNum > 0 && !metodo_pago) {
+      const e = new Error("metodo_pago requerido cuando hay anticipo");
+      e.code = "VALIDATION";
+      throw e;
+    }
 
     const pRes = await client.query(
       `
       INSERT INTO ventas.pedidos
         (cliente_id, vendedor_id, tipo, estado, subtotal, descuento, costo_envio, total, fecha_limite_apartado)
       VALUES
-        ($1,$2,$3,'PENDIENTE',$4,0,0,$5,$6)
+        ($1, $2, $3, $4, $5, 0, 0, $6, $7)
       RETURNING *
       `,
       [
         cliente_id,
         vendedor_id,
         tipo,
+        "APARTADO",
         subtotal,
         total,
         fecha_limite_apartado || null,
@@ -320,16 +366,12 @@ export async function crearApartado(
     for (const it of normalizedItems) {
       await client.query(
         `
-        INSERT INTO ventas.detalles_pedido (pedido_id, producto_id, variante_id, cantidad, precio_unitario)
-        VALUES ($1,$2,$3,$4,$5)
+        INSERT INTO ventas.detalles_pedido
+          (pedido_id, variante_id, cantidad, precio_unitario)
+        VALUES
+          ($1, $2, $3, $4)
         `,
-        [
-          pedido.id,
-          it.producto_id,
-          it.variante_id,
-          it.cantidad,
-          it.precio_unitario,
-        ],
+        [pedido.id, it.variante_id, it.cantidad, it.precio_unitario],
       );
 
       await client.query(
@@ -343,19 +385,11 @@ export async function crearApartado(
       );
     }
 
-    const anticipoNum = toMoney(anticipo);
-
     if (anticipoNum > 0) {
-      if (!metodo_pago) {
-        const e = new Error("metodo_pago requerido cuando hay anticipo");
-        e.code = "VALIDATION";
-        throw e;
-      }
-
       await client.query(
         `
         INSERT INTO ventas.pagos (pedido_id, monto, metodo)
-        VALUES ($1,$2,$3)
+        VALUES ($1, $2, $3)
         `,
         [pedido.id, anticipoNum, metodo_pago],
       );
@@ -680,33 +714,93 @@ export async function cancelarApartado(
   }
 }
 
-export async function abrirCorte(db, { usuario_id }) {
+export async function abrirCorte(db, { usuario_id, fondo_inicial = 0 }) {
+  const fondoInicialNum = toMoney(fondo_inicial);
+
+  if (fondoInicialNum < 0) {
+    const e = new Error("fondo_inicial debe ser >= 0");
+    e.code = "VALIDATION";
+    throw e;
+  }
+
   const { rows } = await db.query(
     `
-    INSERT INTO ventas.corte_caja (usuario_id, inicio_turno, total_sistema, total_real, observaciones)
-    VALUES ($1, now(), 0, 0, null)
+    INSERT INTO ventas.corte_caja
+      (usuario_id, inicio_turno, fin_turno, fondo_inicial, total_sistema, total_real, observaciones)
+    VALUES
+      ($1, now(), NULL, $2, 0, 0, null)
     RETURNING *
     `,
-    [usuario_id],
+    [usuario_id, fondoInicialNum],
   );
 
   return rows[0];
 }
 
 export async function getCorteAbierto(db, { usuario_id }) {
-  const { rows } = await db.query(
-    `
-    SELECT *
-    FROM ventas.corte_caja
-    WHERE usuario_id = $1
-      AND fin_turno IS NULL
-    ORDER BY inicio_turno DESC
-    LIMIT 1
-    `,
-    [usuario_id],
-  );
+  const client = await db.connect();
 
-  return rows[0] || null;
+  try {
+    const { rows } = await client.query(
+      `
+      SELECT 
+        c.*,
+        COALESCE(u.nombres, 'Usuario') || ' ' || COALESCE(u.apellido_paterno, '') AS usuario_nombre
+      FROM ventas.corte_caja c
+      LEFT JOIN seguridad.usuarios u ON c.usuario_id = u.id
+      WHERE c.usuario_id = $1
+        AND c.fin_turno IS NULL
+      ORDER BY c.inicio_turno DESC
+      LIMIT 1
+      `,
+      [usuario_id],
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const corte = rows[0];
+
+    const { rows: pagosRows } = await client.query(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN pa.metodo = 'EFECTIVO' THEN pa.monto ELSE 0 END), 0) AS total_efectivo,
+        COALESCE(SUM(CASE WHEN pa.metodo IN ('TARJETA_CREDITO', 'TARJETA_DEBITO') THEN pa.monto ELSE 0 END), 0) AS total_tarjeta,
+        COALESCE(SUM(CASE WHEN pa.metodo = 'TRANSFERENCIA' THEN pa.monto ELSE 0 END), 0) AS total_transferencia,
+        COALESCE(SUM(pa.monto), 0) AS total_pagos
+      FROM ventas.pagos pa
+      INNER JOIN ventas.pedidos pe ON pe.id = pa.pedido_id
+      WHERE pe.vendedor_id = $1
+        AND pa.fecha_pago >= $2
+        AND pa.fecha_pago <= now()
+        AND pe.estado = 'PAGADO'
+      `,
+      [usuario_id, corte.inicio_turno],
+    );
+
+    const totalEfectivo = toMoney(pagosRows[0].total_efectivo);
+    const totalTarjeta = toMoney(pagosRows[0].total_tarjeta);
+    const totalTransferencia = toMoney(pagosRows[0].total_transferencia);
+    const totalPagos = toMoney(pagosRows[0].total_pagos);
+    const fondoInicial = toMoney(corte.fondo_inicial ?? 0);
+    const efectivoEsperado = toMoney(fondoInicial + totalEfectivo);
+
+    return {
+      ...corte,
+      usuario_nombre: corte.usuario_nombre,
+      resumen: {
+        fondo_inicial: fondoInicial,
+        total_efectivo: totalEfectivo,
+        total_tarjeta: totalTarjeta,
+        total_transferencia: totalTransferencia,
+        total_pagos: totalPagos,
+        efectivo_esperado: efectivoEsperado,
+      },
+    };
+  } finally {
+    client.release();
+  }
 }
 
 export async function cerrarCorte(
@@ -744,25 +838,36 @@ export async function cerrarCorte(
     }
 
     const totalRealNum = toMoney(total_real);
+
     if (totalRealNum < 0) {
       const e = new Error("total_real debe ser >= 0");
       e.code = "VALIDATION";
       throw e;
     }
 
-    const { rows: sRows } = await client.query(
+    const { rows: pagosRows } = await client.query(
       `
-      SELECT COALESCE(SUM(total),0) AS total_sistema
-      FROM ventas.pedidos
-      WHERE vendedor_id = $1
-        AND fecha_creacion >= $2
-        AND fecha_creacion <= now()
-        AND estado = 'PAGADO'
+      SELECT
+        COALESCE(SUM(CASE WHEN pa.metodo = 'EFECTIVO' THEN pa.monto ELSE 0 END), 0) AS total_efectivo,
+        COALESCE(SUM(CASE WHEN pa.metodo IN ('TARJETA_CREDITO', 'TARJETA_DEBITO') THEN pa.monto ELSE 0 END), 0) AS total_tarjeta,
+        COALESCE(SUM(CASE WHEN pa.metodo = 'TRANSFERENCIA' THEN pa.monto ELSE 0 END), 0) AS total_transferencia,
+        COALESCE(SUM(pa.monto), 0) AS total_pagos
+      FROM ventas.pagos pa
+      INNER JOIN ventas.pedidos pe ON pe.id = pa.pedido_id
+      WHERE pe.vendedor_id = $1
+        AND pa.fecha_pago >= $2
+        AND pa.fecha_pago <= now()
+        AND pe.estado = 'PAGADO'
       `,
       [usuario_id, corte.inicio_turno],
     );
 
-    const total_sistema = toMoney(sRows[0].total_sistema);
+    const totalEfectivo = toMoney(pagosRows[0].total_efectivo);
+    const totalTarjeta = toMoney(pagosRows[0].total_tarjeta);
+    const totalTransferencia = toMoney(pagosRows[0].total_transferencia);
+    const totalPagos = toMoney(pagosRows[0].total_pagos);
+    const fondoInicial = toMoney(corte.fondo_inicial ?? 0);
+    const total_sistema = toMoney(fondoInicial + totalEfectivo);
 
     const out = await client.query(
       `
@@ -779,12 +884,87 @@ export async function cerrarCorte(
       [corte_id, usuario_id, total_sistema, totalRealNum, observaciones],
     );
 
+    const corteCerrado = out.rows[0];
+
+    const { rows: usuarioRows } = await client.query(
+      `
+      SELECT
+        COALESCE(u.nombres, 'Usuario') || ' ' || COALESCE(u.apellido_paterno, '') AS usuario_nombre
+      FROM seguridad.usuarios u
+      WHERE u.id = $1
+      `,
+      [corteCerrado.usuario_id],
+    );
+
+    const usuario_nombre = usuarioRows[0]?.usuario_nombre ?? "Usuario";
+
     await client.query("COMMIT");
-    return out.rows[0] || null;
+
+    return {
+      ...corteCerrado,
+      usuario_nombre,
+      resumen: {
+        fondo_inicial: fondoInicial,
+        total_efectivo: totalEfectivo,
+        total_tarjeta: totalTarjeta,
+        total_transferencia: totalTransferencia,
+        total_pagos: totalPagos,
+        efectivo_esperado: total_sistema,
+      },
+    };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
   }
+}
+
+export async function getHistorialCortes(db) {
+  const { rows } = await db.query(`
+    SELECT 
+      c.id,
+      c.usuario_id,
+      c.inicio_turno,
+      c.fin_turno,
+      c.fondo_inicial,
+      c.total_sistema,
+      c.total_real,
+      c.observaciones,
+      COALESCE(u.nombres, 'Usuario') || ' ' || COALESCE(u.apellido_paterno, '') AS usuario_nombre
+    FROM ventas.corte_caja c
+    LEFT JOIN seguridad.usuarios u ON c.usuario_id = u.id
+    ORDER BY c.inicio_turno DESC
+  `);
+
+  return rows;
+}
+
+export async function getCorteById(db, corte_id) {
+  const { rows } = await db.query(
+    `
+    SELECT 
+      c.id,
+      c.usuario_id,
+      c.inicio_turno,
+      c.fin_turno,
+      c.fondo_inicial,
+      c.total_sistema,
+      c.total_real,
+      c.observaciones,
+      COALESCE(u.nombres, 'Usuario') || ' ' || COALESCE(u.apellido_paterno, '') AS usuario_nombre
+    FROM ventas.corte_caja c
+    LEFT JOIN seguridad.usuarios u ON c.usuario_id = u.id
+    WHERE c.id = $1
+    `,
+    [corte_id],
+  );
+
+  if (rows.length === 0) {
+    const e = new Error("Corte no encontrado");
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+
+  return rows[0];
 }
