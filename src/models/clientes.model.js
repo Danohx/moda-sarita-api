@@ -118,6 +118,125 @@ export async function setCreditoCliente(
   return rows[0] || null;
 }
 
+export async function getMovimientosCredito(db, clienteId) {
+  const query = `
+    SELECT 
+      id, 
+      fecha, 
+      LOWER(tipo) AS tipo, -- Convertimos a minúscula para que el frontend ponga el icono correcto
+      descripcion, 
+      monto, 
+      saldo_resultante AS "saldoResultante", -- Alias para que el JSON haga match con la interfaz de TS
+      metodo_pago 
+    FROM clientes.movimientos_credito
+    WHERE cliente_id = $1
+    ORDER BY fecha DESC
+  `;
+  const { rows } = await db.query(query, [clienteId]);
+  return rows;
+}
+
+export async function abonarCreditoCliente(
+  db,
+  id,
+  { monto, metodo_pago, referencia_externa = null, observaciones = null }
+) {
+  const m = Number(monto);
+
+  if (!Number.isFinite(m) || m <= 0) {
+    const e = new Error("El monto a abonar debe ser mayor a 0");
+    e.code = "VALIDATION";
+    throw e;
+  }
+
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const { rows: clienteRows } = await client.query(
+      `
+      SELECT id, saldo_deudor, limite_credito, tiene_credito
+      FROM clientes.clientes
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [id]
+    );
+
+    if (clienteRows.length === 0) {
+      const e = new Error("Cliente no encontrado");
+      e.code = "NOT_FOUND";
+      throw e;
+    }
+
+    const cliente = clienteRows[0];
+
+    if (!cliente.tiene_credito) {
+      const e = new Error("El cliente no tiene crédito habilitado");
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    const saldoAnterior = Number(cliente.saldo_deudor ?? 0);
+    const saldoResultante = Math.max(saldoAnterior - m, 0);
+    const montoAplicado = Math.min(m, saldoAnterior);
+
+    if (montoAplicado <= 0) {
+      const e = new Error("El cliente no tiene saldo pendiente por abonar");
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    const { rows: updatedRows } = await client.query(
+      `
+      UPDATE clientes.clientes
+      SET saldo_deudor = $2
+      WHERE id = $1
+      RETURNING id, saldo_deudor, limite_credito, tiene_credito
+      `,
+      [id, saldoResultante]
+    );
+
+    await client.query(
+      `
+      INSERT INTO clientes.movimientos_credito (
+        cliente_id,
+        tipo,
+        descripcion,
+        monto,
+        saldo_anterior,
+        saldo_resultante,
+        metodo_pago,
+        referencia_externa,
+        observaciones
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        id,
+        "ABONO",
+        "Abono a crédito",
+        -montoAplicado,
+        saldoAnterior,
+        saldoResultante,
+        metodo_pago,
+        referencia_externa,
+        observaciones,
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    return updatedRows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function createDireccion(db, clienteId, payload) {
   const {
     calle,

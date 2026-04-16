@@ -10,6 +10,8 @@ import {
   postDireccion,
   patchDireccionPrincipal,
   deleteDireccionById,
+  postAbonoCredito,
+  getClienteMovimientosCredito,
 } from "../controllers/clientes.controller.js";
 
 const router = Router();
@@ -20,6 +22,8 @@ router.post("/", postCliente);
 router.get("/:id", getCliente);
 router.patch("/:id", patchCliente);
 router.patch("/:id/credito", requireRole("ADMIN"), patchCredito);
+router.get("/:id/movimientos-credito", getClienteMovimientosCredito);
+router.post("/:id/abonos", postAbonoCredito);
 router.post("/:id/direcciones", postDireccion);
 router.patch(
   "/:id/direcciones/:direccionId/principal",

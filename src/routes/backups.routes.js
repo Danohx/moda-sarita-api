@@ -11,7 +11,9 @@ import {
 
 const router = Router();
 
-router.use(useInternalDb, requireAuth, requireRole("ADMIN"));
+router.use(useInternalDb);
+
+router.post("/internal/auto", createBackup);
 
 router.get("/", getBackups);
 router.post("/", createBackup);

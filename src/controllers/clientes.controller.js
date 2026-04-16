@@ -8,6 +8,8 @@ import {
   createDireccion,
   setDireccionPrincipal,
   deleteDireccion,
+  abonarCreditoCliente,
+  getMovimientosCredito,
 } from "../models/clientes.model.js";
 
 export async function getClientes(req, res) {
@@ -32,7 +34,7 @@ export async function getCliente(req, res) {
       return res.status(404).json({ ok: false, msg: "Cliente no encontrado" });
 
     const direcciones = await listDirecciones(req.db, id);
-    return res.json({ ok: true, data: { cliente, direcciones } });
+    return res.json({ ok: true, data: { ...cliente, direcciones } });
   } catch (err) {
     console.error("getCliente error:", err);
     return res
@@ -140,6 +142,52 @@ export async function patchCredito(req, res) {
         msg: "Error actualizando crédito",
         detail: err.message,
       });
+  }
+}
+
+export async function getClienteMovimientosCredito(req, res) {
+  try {
+    const clienteId = String(req.params.id);
+
+    const cliente = await getClienteById(req.db, clienteId);
+    if (!cliente) {
+      return res.status(404).json({ ok: false, msg: "Cliente no encontrado" });
+    }
+
+    const data = await getMovimientosCredito(req.db, clienteId);
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("getClienteMovimientosCredito error:", err);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error obteniendo movimientos de crédito",
+      detail: err.message,
+    });
+  }
+}
+
+export async function postAbonoCredito(req, res) {
+  try {
+    const id = String(req.params.id);
+    const { monto, metodo_pago, referencia_externa } = req.body || {};
+    
+    if (!monto || Number(monto) <= 0) {
+      return res.status(400).json({ ok: false, msg: "Monto inválido o requerido" });
+    }
+
+    const row = await abonarCreditoCliente(req.db, id, { monto, metodo_pago });
+    if (!row) {
+      return res.status(404).json({ ok: false, msg: "Cliente no encontrado" });
+    }
+
+    return res.json({ ok: true, data: row });
+  } catch (err) {
+    console.error("postAbonoCredito error:", err);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error registrando el abono",
+      detail: err.message,
+    });
   }
 }
 
