@@ -1,4 +1,8 @@
-import { SuscripcionModel } from "../models/suscripcion.model.js";
+import {
+  createSuscripcion,
+  findSuscripcionByEmail,
+  listAllSuscripciones,
+} from "../models/suscripcion.model.js";
 import { enviarCorreo } from "../config/mailer.config.js";
 
 export const suscribirUsuario = async (req, res) => {
@@ -7,12 +11,13 @@ export const suscribirUsuario = async (req, res) => {
   const emailNorm = String(email || "")
     .trim()
     .toLowerCase();
+
   if (!emailNorm.match(/^\S+@\S+\.\S+$/)) {
     return res.status(400).json({ ok: false, msg: "Email inválido" });
   }
 
   try {
-    const existe = await SuscripcionModel.findByEmail(emailNorm);
+    const existe = await findSuscripcionByEmail(emailNorm);
     if (existe) {
       return res.status(400).json({
         ok: false,
@@ -20,7 +25,7 @@ export const suscribirUsuario = async (req, res) => {
       });
     }
 
-    await SuscripcionModel.create(emailNorm);
+    await createSuscripcion(emailNorm);
 
     const htmlBienvenida = `
       <div style="font-family: 'Manrope', Arial, sans-serif; max-width: 600px; margin: 20px auto; border: 1px solid #eee; border-radius: 16px; overflow: hidden;">
@@ -108,7 +113,7 @@ export const anunciarLanzamiento = async (req, res) => {
   }
 
   try {
-    const suscriptores = await SuscripcionModel.findAll();
+    const suscriptores = await listAllSuscripciones();
 
     if (suscriptores.length === 0) {
       return res.json({

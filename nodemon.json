@@ -1,0 +1,11 @@
+{
+  "watch": ["src", "routes", "middleware", "utils", "index.js"],
+  "ext": "js,json",
+  "ignore": [
+    "backups/*",
+    "node_modules/*",
+    "logs/*",
+    "*.test.js"
+  ],
+  "delay": 500
+}
