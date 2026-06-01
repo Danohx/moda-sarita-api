@@ -1,6 +1,6 @@
 export async function listProductosPublic(
   db,
-  { q = null, categoriaId = null, destacado = null } = {},
+  { q = null, categoriaId = null, destacado = null, temporadaId = null } = {},
 ) {
   const sql = `
     SELECT
@@ -44,16 +44,20 @@ export async function listProductosPublic(
       AND ($1::text IS NULL OR p.nombre ILIKE '%' || $1 || '%' OR COALESCE(p.descripcion, '') ILIKE '%' || $1 || '%')
       AND ($2::int IS NULL OR p.categoria_id = $2)
       AND ($3::boolean IS NULL OR p.destacado = $3)
+      AND ($4::int IS NULL OR EXISTS (
+        SELECT 1 FROM inventario.producto_temporadas pt
+        WHERE pt.producto_id = p.id AND pt.temporada_id = $4
+      ))
     ORDER BY p.destacado DESC, p.fecha_creacion DESC;
   `;
 
-  const { rows } = await db.query(sql, [q, categoriaId, destacado]);
+  const { rows } = await db.query(sql, [q, categoriaId, destacado, temporadaId]);
   return rows;
 }
 
 export async function listProductosAdmin(
   db,
-  { q = null, categoriaId = null, destacado = null, activo = null } = {},
+  { q = null, categoriaId = null, destacado = null, activo = null, temporadaId = null } = {},
 ) {
   const sql = `
     SELECT
@@ -130,10 +134,14 @@ export async function listProductosAdmin(
       AND ($2::int IS NULL OR p.categoria_id = $2)
       AND ($3::boolean IS NULL OR p.destacado = $3)
       AND ($4::boolean IS NULL OR p.activo = $4)
+      AND ($5::int IS NULL OR EXISTS (
+        SELECT 1 FROM inventario.producto_temporadas pt
+        WHERE pt.producto_id = p.id AND pt.temporada_id = $5
+      ))
     ORDER BY p.fecha_creacion DESC;
   `;
 
-  const { rows } = await db.query(sql, [q, categoriaId, destacado, activo]);
+  const { rows } = await db.query(sql, [q, categoriaId, destacado, activo, temporadaId]);
   return rows;
 }
 

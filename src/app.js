@@ -20,6 +20,8 @@ import monitoringRoutes from "./routes/monitoring.routes.js";
 // import backupsRoutes from "./routes/backups.routes.js";
 import maintenanceRoutes from "./routes/maintenance.routes.js";
 import auditLogsRoutes from "./routes/auditLogs.routes.js";
+import temporadasRoutes from "./routes/temporadas.routes.js";
+import prediccionesRoutes from "./routes/predicciones.routes.js";
 
 const app = express();
 
@@ -70,5 +72,7 @@ app.use("/api/monitoring", monitoringRoutes);
 // app.use("/api/backups", backupsRoutes);
 app.use("/api/maintenance", maintenanceRoutes);
 app.use("/api/audit-logs", auditLogsRoutes);
+app.use("/api/temporadas", temporadasRoutes);
+app.use("/api/predicciones", prediccionesRoutes);
 
 export default app;

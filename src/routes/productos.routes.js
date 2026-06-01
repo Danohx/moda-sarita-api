@@ -25,6 +25,11 @@ import {
   patchProductoImagenesReorder,
 } from "../controllers/productoImagenes.controller.js";
 import { getProductoDetalle } from "../controllers/productoDetalle.controller.js";
+import {
+  getProductoTemporadas,
+  postProductoTemporadas,
+  deleteProductoTemporada,
+} from "../controllers/productoTemporadas.controller.js";
 
 const router = Router();
 
@@ -117,5 +122,9 @@ router.patch(
   requireRole("ADMIN", "EMPLEADO"),
   patchProductoImagenesReorder,
 );
+
+router.get("/:id/temporadas", usePublicDb, getProductoTemporadas);
+router.post("/:id/temporadas", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), postProductoTemporadas);
+router.delete("/:id/temporadas/:temporadaId", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), deleteProductoTemporada);
 
 export default router;
