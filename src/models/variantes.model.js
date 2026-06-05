@@ -1,31 +1,29 @@
 export async function getVarianteById(db, id) {
   const sql = `
     SELECT
-      v.id,
-      v.producto_id,
-      p.nombre AS producto_nombre,
-      v.talla_id,
-      t.nombre AS talla_nombre,
-      t.tipo AS talla_tipo,
-      v.color_id,
-      c.nombre AS color_nombre,
-      c.hex AS color_hex,
-      v.sku,
-      v.codigo_barras,
-      v.precio_venta,
-      v.precio_costo,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.stock_minimo,
-      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      v.activo,
-      v.created_at,
-      v.updated_at
-    FROM inventario.variantes_producto v
-    JOIN inventario.productos p ON p.id = v.producto_id
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c ON c.id = v.color_id
-    WHERE v.id = $1
+      id,
+      producto_id,
+      producto_nombre,
+      talla_id,
+      talla_nombre,
+      talla_tipo,
+      color_id,
+      color_nombre,
+      color_hex,
+      sku,
+      codigo_barras,
+      precio_venta,
+      precio_costo,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      stock_disponible,
+      activo,
+      created_at,
+      updated_at
+    FROM inventario.v_variantes_detalle
+    WHERE id = $1
+    LIMIT 1;
   `;
 
   const { rows } = await db.query(sql, [id]);
@@ -115,73 +113,68 @@ export async function adjustStockVariante(
 export async function listVariantesByProductoPublic(db, productoId) {
   const sql = `
     SELECT
-      v.id,
-      v.producto_id,
-      v.talla_id,
-      t.nombre AS talla_nombre,
-      t.tipo AS talla_tipo,
-      v.color_id,
-      c.nombre AS color_nombre,
-      c.hex AS color_hex,
-      v.sku,
-      v.codigo_barras,
-      v.precio_venta,
-      v.precio_costo,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.stock_minimo,
-      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      v.activo,
-      v.created_at,
-      v.updated_at
-    FROM inventario.variantes_producto v
-    JOIN inventario.productos p ON p.id = v.producto_id
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c ON c.id = v.color_id
-    WHERE v.producto_id = $1
-      AND v.activo = TRUE
-      AND p.activo = TRUE
-    ORDER BY t.nombre NULLS LAST, c.nombre NULLS LAST, v.created_at ASC;
+      id,
+      producto_id,
+      talla_id,
+      talla_nombre,
+      talla_tipo,
+      color_id,
+      color_nombre,
+      color_hex,
+      sku,
+      codigo_barras,
+      precio_venta,
+      precio_costo,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      stock_disponible,
+      activo,
+      created_at,
+      updated_at
+    FROM inventario.v_variantes_detalle
+    WHERE producto_id = $1
+      AND variante_activo = TRUE
+      AND producto_activo = TRUE
+    ORDER BY talla_nombre NULLS LAST, color_nombre NULLS LAST, created_at ASC;
   `;
 
   const { rows } = await db.query(sql, [productoId]);
   return rows;
 }
 
-export async function listVariantesByProductoAdmin(db, productoId){
+export async function listVariantesByProductoAdmin(db, productoId) {
   const sql = `
     SELECT
-      v.id,
-      v.producto_id,
-      v.talla_id,
-      t.nombre AS talla_nombre,
-      t.tipo AS talla_tipo,
-      v.color_id,
-      c.nombre AS color_nombre,
-      c.hex AS color_hex,
-      v.sku,
-      v.codigo_barras,
-      v.precio_venta,
-      v.precio_costo,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.stock_minimo,
-      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      v.activo,
-      v.created_at,
-      v.updated_at
-    FROM inventario.variantes_producto v
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c ON c.id = v.color_id
-    WHERE v.producto_id = $1
+      id,
+      producto_id,
+      talla_id,
+      talla_nombre,
+      talla_tipo,
+      color_id,
+      color_nombre,
+      color_hex,
+      sku,
+      codigo_barras,
+      precio_venta,
+      precio_costo,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      stock_disponible,
+      activo,
+      created_at,
+      updated_at
+    FROM inventario.v_variantes_detalle
+    WHERE producto_id = $1
     ORDER BY
-    CASE
-      WHEN v.talla_id IS NULL AND v.color_id IS NULL THEN 0
-      ELSE 1
-    END,
-    t.nombre NULLS LAST,
-    c.nombre NULLS LAST,
-    v.created_at ASC
+      CASE
+        WHEN talla_id IS NULL AND color_id IS NULL THEN 0
+        ELSE 1
+      END,
+      talla_nombre NULLS LAST,
+      color_nombre NULLS LAST,
+      created_at ASC
   `;
 
   const { rows } = await db.query(sql, [productoId]);
@@ -321,7 +314,7 @@ export async function setVarianteStatus(db, id, activo) {
       WHERE id = $1
       FOR UPDATE
       `,
-      [id]
+      [id],
     );
 
     if (found.length === 0) {
@@ -339,13 +332,15 @@ export async function setVarianteStatus(db, id, activo) {
         WHERE producto_id = $1
           AND activo = TRUE
         `,
-        [variante.producto_id]
+        [variante.producto_id],
       );
 
       const totalActivas = Number(activeRows[0]?.total || 0);
 
       if (variante.activo === true && totalActivas <= 1) {
-        const err = new Error("No puedes desactivar la última variante activa del producto");
+        const err = new Error(
+          "No puedes desactivar la última variante activa del producto",
+        );
         err.code = "LAST_ACTIVE_VARIANT";
         throw err;
       }
@@ -359,7 +354,7 @@ export async function setVarianteStatus(db, id, activo) {
       WHERE id = $1
       RETURNING id, producto_id, activo, updated_at;
       `,
-      [id, activo]
+      [id, activo],
     );
 
     await client.query("COMMIT");

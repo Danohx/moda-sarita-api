@@ -743,7 +743,7 @@ export async function getCorteAbierto(db, { usuario_id }) {
   try {
     const { rows } = await client.query(
       `
-      SELECT 
+      SELECT
         c.*,
         COALESCE(u.nombres, 'Usuario') || ' ' || COALESCE(u.apellido_paterno, '') AS usuario_nombre
       FROM ventas.corte_caja c
@@ -765,16 +765,15 @@ export async function getCorteAbierto(db, { usuario_id }) {
     const { rows: pagosRows } = await client.query(
       `
       SELECT
-        COALESCE(SUM(CASE WHEN pa.metodo = 'EFECTIVO' THEN pa.monto ELSE 0 END), 0) AS total_efectivo,
-        COALESCE(SUM(CASE WHEN pa.metodo IN ('TARJETA_CREDITO', 'TARJETA_DEBITO') THEN pa.monto ELSE 0 END), 0) AS total_tarjeta,
-        COALESCE(SUM(CASE WHEN pa.metodo = 'TRANSFERENCIA' THEN pa.monto ELSE 0 END), 0) AS total_transferencia,
-        COALESCE(SUM(pa.monto), 0) AS total_pagos
-      FROM ventas.pagos pa
-      INNER JOIN ventas.pedidos pe ON pe.id = pa.pedido_id
-      WHERE pe.vendedor_id = $1
-        AND pa.fecha_pago >= $2
-        AND pa.fecha_pago <= now()
-        AND pe.estado = 'PAGADO'
+        COALESCE(SUM(monto) FILTER (WHERE metodo = 'EFECTIVO'), 0) AS total_efectivo,
+        COALESCE(SUM(monto) FILTER (WHERE metodo IN ('TARJETA_CREDITO', 'TARJETA_DEBITO')), 0) AS total_tarjeta,
+        COALESCE(SUM(monto) FILTER (WHERE metodo = 'TRANSFERENCIA'), 0) AS total_transferencia,
+        COALESCE(SUM(monto), 0) AS total_pagos
+      FROM ventas.v_pagos_corte_detalle
+      WHERE vendedor_id = $1
+        AND fecha_pago >= $2
+        AND fecha_pago <= now()
+        AND pedido_estado = 'PAGADO'
       `,
       [usuario_id, corte.inicio_turno],
     );

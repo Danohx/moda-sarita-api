@@ -5,61 +5,61 @@ export async function listExistencias(
   const params = [];
   let i = 1;
 
-  let where = `p.activo = TRUE AND v.activo = TRUE`;
+  const where = ["producto_activo = TRUE", "variante_activo = TRUE"];
 
   if (categoriaId) {
     params.push(categoriaId);
-    where += ` AND p.categoria_id = $${i++}`;
+    where.push(`categoria_id = $${i++}`);
   }
 
-  if (q) {
-    params.push(`%${q}%`, `%${q}%`, `%${q}%`);
-    where += ` AND (
-      p.nombre ILIKE $${i++}
-      OR v.sku ILIKE $${i++}
-      OR COALESCE(v.codigo_barras, '') ILIKE $${i++}
-    )`;
+  const term = q ? String(q).trim() : null;
+  if (term) {
+    params.push(`%${term}%`);
+    where.push(`(
+      producto_nombre ILIKE $${i}
+      OR sku ILIKE $${i}
+      OR codigo_barras ILIKE $${i}
+    )`);
+    i++;
   }
 
   if (soloBajoStock) {
-    where += ` AND (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(v.stock_minimo, 0))`;
+    where.push("bajo_stock = TRUE");
   }
 
   params.push(limit);
+  const limitParam = i++;
   params.push(offset);
+  const offsetParam = i++;
 
   const sql = `
     SELECT
-      v.id AS variante_id,
-      p.id AS producto_id,
-      p.nombre AS producto_nombre,
-      p.categoria_id,
-      c.nombre AS categoria_nombre,
-      v.talla_id,
-      t.nombre AS talla_nombre,
-      t.tipo AS talla_tipo,
-      v.color_id,
-      c2.nombre AS color_nombre,
-      c2.hex AS color_hex,
-      v.sku,
-      v.codigo_barras,
-      v.precio_venta,
-      v.precio_costo,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.stock_minimo,
-      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(v.stock_minimo, 0)) AS bajo_stock,
-      v.activo,
-      v.updated_at
-    FROM inventario.variantes_producto v
-    JOIN inventario.productos p ON p.id = v.producto_id
-    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c2 ON c2.id = v.color_id
-    WHERE ${where}
-    ORDER BY p.nombre ASC, t.nombre NULLS LAST, c2.nombre NULLS LAST
-    LIMIT $${i++} OFFSET $${i++};
+      variante_id,
+      producto_id,
+      producto_nombre,
+      categoria_id,
+      categoria_nombre,
+      talla_id,
+      talla_nombre,
+      talla_tipo,
+      color_id,
+      color_nombre,
+      color_hex,
+      sku,
+      codigo_barras,
+      precio_venta,
+      precio_costo,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      stock_disponible,
+      bajo_stock,
+      activo,
+      updated_at
+    FROM inventario.v_existencias_detalle
+    WHERE ${where.join(" AND ")}
+    ORDER BY producto_nombre ASC, talla_nombre NULLS LAST, color_nombre NULLS LAST
+    LIMIT $${limitParam} OFFSET $${offsetParam};
   `;
 
   const { rows } = await db.query(sql, params);
@@ -70,32 +70,29 @@ export async function getStockByVariante(db, varianteId) {
   const { rows } = await db.query(
     `
     SELECT
-      v.id AS variante_id,
-      v.producto_id,
-      p.nombre AS producto_nombre,
-      p.categoria_id,
-      c.nombre AS categoria_nombre,
-      v.talla_id,
-      t.nombre AS talla_nombre,
-      t.tipo AS talla_tipo,
-      v.color_id,
-      c2.nombre AS color_nombre,
-      c2.hex AS color_hex,
-      v.sku,
-      v.codigo_barras,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.stock_minimo,
-      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      (GREATEST(v.stock_fisico - v.stock_apartado, 0) <= COALESCE(v.stock_minimo, 0)) AS bajo_stock,
-      v.activo,
-      v.updated_at
-    FROM inventario.variantes_producto v
-    JOIN inventario.productos p ON p.id = v.producto_id
-    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c2 ON c2.id = v.color_id
-    WHERE v.id = $1
+      variante_id,
+      producto_id,
+      producto_nombre,
+      categoria_id,
+      categoria_nombre,
+      talla_id,
+      talla_nombre,
+      talla_tipo,
+      color_id,
+      color_nombre,
+      color_hex,
+      sku,
+      codigo_barras,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      stock_disponible,
+      bajo_stock,
+      activo,
+      updated_at
+    FROM inventario.v_existencias_detalle
+    WHERE variante_id = $1
+    LIMIT 1;
     `,
     [varianteId],
   );
@@ -109,40 +106,40 @@ export async function listMovimientosByVariante(
 ) {
   const params = [varianteId];
   let i = 2;
-  let where = `m.variante_id = $1`;
+  const where = [`variante_id = $1`];
 
   if (from) {
     params.push(from);
-    where += ` AND m.fecha >= $${i++}::timestamptz`;
+    where.push(`fecha >= $${i++}::timestamptz`);
   }
 
   if (to) {
     params.push(to);
-    where += ` AND m.fecha <= $${i++}::timestamptz`;
+    where.push(`fecha <= $${i++}::timestamptz`);
   }
 
-  params.push(limit, offset);
+  params.push(limit);
+  const limitParam = i++;
+  params.push(offset);
+  const offsetParam = i++;
 
   const sql = `
     SELECT
-      m.id,
-      m.fecha,
-      m.tipo,
-      m.cantidad,
-      m.motivo,
-      m.usuario_id,
-      u.email AS usuario_email,
-      v.id AS variante_id,
-      v.producto_id,
-      p.nombre AS producto_nombre,
-      v.sku
-    FROM inventario.movimientos m
-    JOIN inventario.variantes_producto v ON v.id = m.variante_id
-    JOIN inventario.productos p ON p.id = v.producto_id
-    LEFT JOIN seguridad.usuarios u ON u.id = m.usuario_id
-    WHERE ${where}
-    ORDER BY m.fecha DESC, m.id DESC
-    LIMIT $${i++} OFFSET $${i++};
+      id,
+      fecha,
+      tipo,
+      cantidad,
+      motivo,
+      usuario_id,
+      usuario_email,
+      variante_id,
+      producto_id,
+      producto_nombre,
+      sku
+    FROM inventario.v_kardex_movimientos
+    WHERE ${where.join(" AND ")}
+    ORDER BY fecha DESC, id DESC
+    LIMIT $${limitParam} OFFSET $${offsetParam};
   `;
 
   const { rows } = await db.query(sql, params);
@@ -155,45 +152,44 @@ export async function listMovimientosByProducto(
 ) {
   const params = [productoId];
   let i = 2;
-  let where = `v.producto_id = $1`;
+  const where = [`producto_id = $1`];
 
   if (from) {
     params.push(from);
-    where += ` AND m.fecha >= $${i++}::timestamptz`;
+    where.push(`fecha >= $${i++}::timestamptz`);
   }
 
   if (to) {
     params.push(to);
-    where += ` AND m.fecha <= $${i++}::timestamptz`;
+    where.push(`fecha <= $${i++}::timestamptz`);
   }
 
-  params.push(limit, offset);
+  params.push(limit);
+  const limitParam = i++;
+  params.push(offset);
+  const offsetParam = i++;
 
   const sql = `
     SELECT
-      m.id,
-      m.fecha,
-      m.tipo,
-      m.cantidad,
-      m.motivo,
-      m.variante_id,
-      v.producto_id,
-      v.sku,
-      v.codigo_barras,
-      v.talla_id,
-      t.nombre AS talla_nombre,
-      v.color_id,
-      c.nombre AS color_nombre,
-      m.usuario_id,
-      u.email AS usuario_email
-    FROM inventario.movimientos m
-    JOIN inventario.variantes_producto v ON v.id = m.variante_id
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c ON c.id = v.color_id
-    LEFT JOIN seguridad.usuarios u ON u.id = m.usuario_id
-    WHERE ${where}
-    ORDER BY m.fecha DESC, m.id DESC
-    LIMIT $${i++} OFFSET $${i++};
+      id,
+      fecha,
+      tipo,
+      cantidad,
+      motivo,
+      variante_id,
+      producto_id,
+      sku,
+      codigo_barras,
+      talla_id,
+      talla_nombre,
+      color_id,
+      color_nombre,
+      usuario_id,
+      usuario_email
+    FROM inventario.v_kardex_movimientos
+    WHERE ${where.join(" AND ")}
+    ORDER BY fecha DESC, id DESC
+    LIMIT $${limitParam} OFFSET $${offsetParam};
   `;
 
   const { rows } = await db.query(sql, params);

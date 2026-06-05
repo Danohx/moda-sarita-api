@@ -2,52 +2,48 @@ export async function listProductosPublic(
   db,
   { q = null, categoriaId = null, destacado = null } = {},
 ) {
+  const params = [];
+  let i = 1;
+  const where = ["activo = TRUE"];
+
+  const term = q ? String(q).trim() : null;
+  if (term) {
+    params.push(`%${term}%`);
+    where.push(`(nombre ILIKE $${i} OR descripcion ILIKE $${i})`);
+    i++;
+  }
+
+  if (categoriaId !== null && categoriaId !== undefined) {
+    params.push(categoriaId);
+    where.push(`categoria_id = $${i++}`);
+  }
+
+  if (destacado !== null && destacado !== undefined) {
+    params.push(destacado);
+    where.push(`destacado = $${i++}`);
+  }
+
   const sql = `
     SELECT
-      p.id,
-      p.nombre,
-      p.descripcion,
-      p.activo,
-      p.destacado,
-      p.slug,
-      p.maneja_variantes,
-      p.categoria_id,
-      c.nombre AS categoria_nombre,
-      (
-        SELECT MIN(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_desde,
-      (
-        SELECT MAX(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_hasta,
-      (
-        SELECT COALESCE(SUM(GREATEST(v.stock_fisico - v.stock_apartado, 0)), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS stock_disponible_total,
-      (
-        SELECT pi.url
-        FROM inventario.producto_imagenes pi
-        WHERE pi.producto_id = p.id
-        ORDER BY pi.es_principal DESC, pi.orden ASC, pi.created_at ASC
-        LIMIT 1
-      ) AS imagen_principal
-    FROM inventario.productos p
-    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
-    WHERE p.activo = TRUE
-      AND ($1::text IS NULL OR p.nombre ILIKE '%' || $1 || '%' OR COALESCE(p.descripcion, '') ILIKE '%' || $1 || '%')
-      AND ($2::int IS NULL OR p.categoria_id = $2)
-      AND ($3::boolean IS NULL OR p.destacado = $3)
-    ORDER BY p.destacado DESC, p.fecha_creacion DESC;
+      id,
+      nombre,
+      descripcion,
+      activo,
+      destacado,
+      slug,
+      maneja_variantes,
+      categoria_id,
+      categoria_nombre,
+      precio_desde,
+      precio_hasta,
+      stock_disponible_activo_total AS stock_disponible_total,
+      imagen_principal
+    FROM inventario.v_productos_resumen
+    WHERE ${where.join(" AND ")}
+    ORDER BY destacado DESC, fecha_creacion DESC;
   `;
 
-  const { rows } = await db.query(sql, [q, categoriaId, destacado]);
+  const { rows } = await db.query(sql, params);
   return rows;
 }
 
@@ -55,129 +51,84 @@ export async function listProductosAdmin(
   db,
   { q = null, categoriaId = null, destacado = null, activo = null } = {},
 ) {
+  const params = [];
+  let i = 1;
+  const where = [];
+
+  const term = q ? String(q).trim() : null;
+  if (term) {
+    params.push(`%${term}%`);
+    where.push(`(nombre ILIKE $${i} OR descripcion ILIKE $${i})`);
+    i++;
+  }
+
+  if (categoriaId !== null && categoriaId !== undefined) {
+    params.push(categoriaId);
+    where.push(`categoria_id = $${i++}`);
+  }
+
+  if (destacado !== null && destacado !== undefined) {
+    params.push(destacado);
+    where.push(`destacado = $${i++}`);
+  }
+
+  if (activo !== null && activo !== undefined) {
+    params.push(activo);
+    where.push(`activo = $${i++}`);
+  }
+
   const sql = `
     SELECT
-      p.id,
-      p.nombre,
-      p.descripcion,
-      p.activo,
-      p.destacado,
-      p.slug,
-      p.maneja_variantes,
-      p.categoria_id,
-      p.proveedor_id,
-      c.nombre AS categoria_nombre,
-      (
-        SELECT COUNT(*)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS variantes_count,
-      (
-        SELECT COALESCE(SUM(v.stock_fisico), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS stock_fisico_total,
-      (
-        SELECT COALESCE(SUM(v.stock_apartado), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS stock_apartado_total,
-      (
-        SELECT COALESCE(SUM(GREATEST(v.stock_fisico - v.stock_apartado, 0)), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS stock_disponible_total,
-      (
-        SELECT MIN(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_desde,
-      (
-        SELECT MAX(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_hasta,
-      (
-        SELECT pi.url
-        FROM inventario.producto_imagenes pi
-        WHERE pi.producto_id = p.id
-        ORDER BY pi.es_principal DESC, pi.orden ASC, pi.created_at ASC
-        LIMIT 1
-      ) AS imagen_principal,
-      (
-        SELECT v.sku
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-        ORDER BY v.created_at ASC
-        LIMIT 1
-      ) AS sku,
-      (
-        SELECT MIN(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_venta,
-      (
-        SELECT COALESCE(SUM(GREATEST(v.stock_fisico - v.stock_apartado, 0)), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS stock_total
-    FROM inventario.productos p
-    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
-    WHERE ($1::text IS NULL OR p.nombre ILIKE '%' || $1 || '%' OR COALESCE(p.descripcion, '') ILIKE '%' || $1 || '%')
-      AND ($2::int IS NULL OR p.categoria_id = $2)
-      AND ($3::boolean IS NULL OR p.destacado = $3)
-      AND ($4::boolean IS NULL OR p.activo = $4)
-    ORDER BY p.fecha_creacion DESC;
+      id,
+      nombre,
+      descripcion,
+      activo,
+      destacado,
+      slug,
+      maneja_variantes,
+      categoria_id,
+      proveedor_id,
+      categoria_nombre,
+      variantes_count,
+      stock_fisico_total,
+      stock_apartado_total,
+      stock_disponible_total,
+      precio_desde,
+      precio_hasta,
+      imagen_principal,
+      sku,
+      precio_venta,
+      stock_total
+    FROM inventario.v_productos_resumen
+    ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+    ORDER BY fecha_creacion DESC;
   `;
 
-  const { rows } = await db.query(sql, [q, categoriaId, destacado, activo]);
+  const { rows } = await db.query(sql, params);
   return rows;
 }
 
 export async function getProductoPublicById(db, id) {
   const sqlProducto = `
     SELECT
-      p.id,
-      p.nombre,
-      p.descripcion,
-      p.slug,
-      p.destacado,
-      p.activo,
-      p.maneja_variantes,
-      p.categoria_id,
-      p.proveedor_id,
-      c.nombre AS categoria_nombre,
-      (
-        SELECT MIN(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_desde,
-      (
-        SELECT MAX(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_hasta,
-      (
-        SELECT COUNT(*)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS variantes_activas,
-      (
-        SELECT COALESCE(SUM(GREATEST(v.stock_fisico - v.stock_apartado, 0)), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS stock_disponible_total
-    FROM inventario.productos p
-    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
-    WHERE p.id = $1
-      AND p.activo = TRUE
+      id,
+      nombre,
+      descripcion,
+      slug,
+      destacado,
+      activo,
+      maneja_variantes,
+      categoria_id,
+      proveedor_id,
+      categoria_nombre,
+      precio_desde,
+      precio_hasta,
+      variantes_activas,
+      stock_disponible_activo_total AS stock_disponible_total
+    FROM inventario.v_productos_resumen
+    WHERE id = $1
+      AND activo = TRUE
+    LIMIT 1;
   `;
 
   const sqlImgs = `
@@ -201,73 +152,56 @@ export async function getProductoPublicById(db, id) {
 export async function getProductoAdminByIdModel(db, id) {
   const sqlProducto = `
     SELECT
-      p.id,
-      p.nombre,
-      p.descripcion,
-      p.slug,
-      p.categoria_id,
-      c.nombre AS categoria_nombre,
-      p.proveedor_id,
-      p.activo,
-      p.destacado,
-      p.maneja_variantes,
-      (
-        SELECT COALESCE(SUM(v.stock_fisico), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS stock_fisico_total,
-      (
-        SELECT COALESCE(SUM(v.stock_apartado), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS stock_apartado_total,
-      (
-        SELECT COALESCE(SUM(GREATEST(v.stock_fisico - v.stock_apartado, 0)), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-      ) AS stock_disponible_total,
-      (
-        SELECT COUNT(*)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS variantes_activas
-    FROM inventario.productos p
-    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
-    WHERE p.id = $1
+      id,
+      nombre,
+      descripcion,
+      slug,
+      categoria_id,
+      categoria_nombre,
+      proveedor_id,
+      activo,
+      destacado,
+      maneja_variantes,
+      stock_fisico_total,
+      stock_apartado_total,
+      stock_disponible_total,
+      variantes_activas
+    FROM inventario.v_productos_resumen
+    WHERE id = $1
     LIMIT 1;
   `;
+
   const varianteSql = `
     SELECT
-      v.id,
-      v.sku,
-      v.codigo_barras,
-      v.precio_costo,
-      v.precio_venta,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.stock_minimo,
-      v.activo
-    FROM inventario.variantes_producto v
-    WHERE v.producto_id = $1
-    ORDER BY v.created_at ASC
+      id,
+      sku,
+      codigo_barras,
+      precio_costo,
+      precio_venta,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      activo
+    FROM inventario.v_variantes_detalle
+    WHERE producto_id = $1
+    ORDER BY created_at ASC
     LIMIT 1;
   `;
+
   const variantesSql = `
     SELECT
-      v.id,
-      v.sku,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.activo,
-      t.nombre AS talla_nombre,
-      col.nombre AS color_nombre
-    FROM inventario.variantes_producto v
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores col ON col.id = v.color_id
-    WHERE v.producto_id = $1
-    ORDER BY v.created_at ASC;
+      id,
+      sku,
+      stock_fisico,
+      stock_apartado,
+      activo,
+      talla_nombre,
+      color_nombre
+    FROM inventario.v_variantes_detalle
+    WHERE producto_id = $1
+    ORDER BY created_at ASC;
   `;
+
   const imagenesSql = `
     SELECT
       pi.id,

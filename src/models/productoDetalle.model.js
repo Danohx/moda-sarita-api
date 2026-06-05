@@ -2,69 +2,29 @@ export async function getProductoDetallePublic(db, productoId) {
   const { rows: prodRows } = await db.query(
     `
     SELECT
-      p.id,
-      p.nombre,
-      p.descripcion,
-      p.slug,
-      p.destacado,
-      p.activo,
-      p.maneja_variantes,
-      p.categoria_id,
-      c.nombre AS categoria_nombre,
-      p.proveedor_id,
-      p.fecha_creacion,
-      (
-        SELECT MIN(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_desde,
-      (
-        SELECT MAX(v.precio_venta)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS precio_hasta,
-      (
-        SELECT MIN(v.precio_costo)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS costo_desde,
-      (
-        SELECT MAX(v.precio_costo)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS costo_hasta,
-      (
-        SELECT COUNT(*)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS variantes_activas,
-      (
-        SELECT COALESCE(SUM(v.stock_fisico), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS stock_fisico_total,
-      (
-        SELECT COALESCE(SUM(v.stock_apartado), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS stock_apartado_total,
-      (
-        SELECT COALESCE(SUM(GREATEST(v.stock_fisico - v.stock_apartado, 0)), 0)
-        FROM inventario.variantes_producto v
-        WHERE v.producto_id = p.id
-          AND v.activo = TRUE
-      ) AS stock_disponible_total
-    FROM inventario.productos p
-    LEFT JOIN inventario.categorias c ON c.id = p.categoria_id
-    WHERE p.id = $1
-      AND p.activo = TRUE
+      id,
+      nombre,
+      descripcion,
+      slug,
+      destacado,
+      activo,
+      maneja_variantes,
+      categoria_id,
+      categoria_nombre,
+      proveedor_id,
+      fecha_creacion,
+      precio_desde,
+      precio_hasta,
+      costo_desde,
+      costo_hasta,
+      variantes_activas,
+      stock_fisico_activo_total AS stock_fisico_total,
+      stock_apartado_activo_total AS stock_apartado_total,
+      stock_disponible_activo_total AS stock_disponible_total
+    FROM inventario.v_productos_resumen
+    WHERE id = $1
+      AND activo = TRUE
+    LIMIT 1;
     `,
     [productoId],
   );
@@ -91,36 +51,33 @@ export async function getProductoDetallePublic(db, productoId) {
   const { rows: variantes } = await db.query(
     `
     SELECT
-      v.id,
-      v.producto_id,
-      v.talla_id,
-      t.nombre AS talla_nombre,
-      t.tipo AS talla_tipo,
-      v.color_id,
-      c.nombre AS color_nombre,
-      c.hex AS color_hex,
-      v.sku,
-      v.codigo_barras,
-      v.precio_venta,
-      v.precio_costo,
-      v.stock_fisico,
-      v.stock_apartado,
-      v.stock_minimo,
-      GREATEST(v.stock_fisico - v.stock_apartado, 0) AS stock_disponible,
-      v.activo,
-      v.created_at,
-      v.updated_at
-    FROM inventario.variantes_producto v
-    JOIN inventario.productos p ON p.id = v.producto_id
-    LEFT JOIN inventario.tallas t ON t.id = v.talla_id
-    LEFT JOIN inventario.colores c ON c.id = v.color_id
-    WHERE v.producto_id = $1
-      AND v.activo = TRUE
-      AND p.activo = TRUE
+      id,
+      producto_id,
+      talla_id,
+      talla_nombre,
+      talla_tipo,
+      color_id,
+      color_nombre,
+      color_hex,
+      sku,
+      codigo_barras,
+      precio_venta,
+      precio_costo,
+      stock_fisico,
+      stock_apartado,
+      stock_minimo,
+      stock_disponible,
+      activo,
+      created_at,
+      updated_at
+    FROM inventario.v_variantes_detalle
+    WHERE producto_id = $1
+      AND variante_activo = TRUE
+      AND producto_activo = TRUE
     ORDER BY
-      t.nombre NULLS LAST,
-      c.nombre NULLS LAST,
-      v.created_at ASC
+      talla_nombre NULLS LAST,
+      color_nombre NULLS LAST,
+      created_at ASC
     `,
     [productoId],
   );

@@ -2,24 +2,37 @@ export async function listClientes(
   db,
   { q = null, includeInactive = false } = {},
 ) {
+  const params = [];
+  let i = 1;
+  const where = [];
+
+  if (!includeInactive) {
+    where.push("activo = TRUE");
+  }
+
+  const term = q ? String(q).trim() : null;
+  if (term) {
+    params.push(`%${term}%`);
+    where.push(`(
+      nombre_completo ILIKE $${i}
+      OR telefono ILIKE $${i}
+      OR email ILIKE $${i}
+    )`);
+    i++;
+  }
+
   const sql = `
     SELECT
       id, usuario_id, nombres, apellido_paterno, apellido_materno,
       telefono, email, tiene_credito, limite_credito, saldo_deudor,
-      fecha_registro,
-      COALESCE(activo, true) as activo
-    FROM clientes.clientes
-    WHERE ($2::boolean = true OR COALESCE(activo, true) = true)
-      AND (
-        $1::text IS NULL
-        OR (nombres || ' ' || apellido_paterno || ' ' || COALESCE(apellido_materno,'')) ILIKE '%'||$1||'%'
-        OR COALESCE(telefono,'') ILIKE '%'||$1||'%'
-        OR COALESCE(email,'') ILIKE '%'||$1||'%'
-      )
+      fecha_registro, activo
+    FROM clientes.v_clientes_busqueda
+    ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY fecha_registro DESC
     LIMIT 200;
   `;
-  const { rows } = await db.query(sql, [q, includeInactive]);
+
+  const { rows } = await db.query(sql, params);
   return rows;
 }
 
@@ -120,17 +133,17 @@ export async function setCreditoCliente(
 
 export async function getMovimientosCredito(db, clienteId) {
   const query = `
-    SELECT 
-      id, 
-      fecha, 
-      LOWER(tipo) AS tipo, -- Convertimos a minúscula para que el frontend ponga el icono correcto
-      descripcion, 
-      monto, 
-      saldo_resultante AS "saldoResultante", -- Alias para que el JSON haga match con la interfaz de TS
-      metodo_pago 
-    FROM clientes.movimientos_credito
+    SELECT
+      id,
+      fecha,
+      tipo,
+      descripcion,
+      monto,
+      "saldoResultante",
+      metodo_pago
+    FROM clientes.v_movimientos_credito
     WHERE cliente_id = $1
-    ORDER BY fecha DESC
+    ORDER BY fecha DESC, id DESC;
   `;
   const { rows } = await db.query(query, [clienteId]);
   return rows;
@@ -139,7 +152,7 @@ export async function getMovimientosCredito(db, clienteId) {
 export async function abonarCreditoCliente(
   db,
   id,
-  { monto, metodo_pago, referencia_externa = null, observaciones = null }
+  { monto, metodo_pago, referencia_externa = null, observaciones = null },
 ) {
   const m = Number(monto);
 
@@ -161,7 +174,7 @@ export async function abonarCreditoCliente(
       WHERE id = $1
       FOR UPDATE
       `,
-      [id]
+      [id],
     );
 
     if (clienteRows.length === 0) {
@@ -195,7 +208,7 @@ export async function abonarCreditoCliente(
       WHERE id = $1
       RETURNING id, saldo_deudor, limite_credito, tiene_credito
       `,
-      [id, saldoResultante]
+      [id, saldoResultante],
     );
 
     await client.query(
@@ -223,7 +236,7 @@ export async function abonarCreditoCliente(
         metodo_pago,
         referencia_externa,
         observaciones,
-      ]
+      ],
     );
 
     await client.query("COMMIT");
