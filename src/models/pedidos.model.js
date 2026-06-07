@@ -1,6 +1,6 @@
 export async function listPedidosAdmin(
   db,
-  { tipo = null, estado = null, q = null, limit = 50, offset = 0 } = {},
+  { tipo = null, estado = null, cliente_id = null, q = null, limit = 50, offset = 0 } = {},
 ) {
   const sql = `
     SELECT
@@ -38,16 +38,17 @@ export async function listPedidosAdmin(
     LEFT JOIN seguridad.usuarios u ON u.id = vpr.vendedor_id
     WHERE ($1::text IS NULL OR vpr.tipo::text = $1)
       AND ($2::text IS NULL OR vpr.estado::text = $2)
+      AND ($3::uuid IS NULL OR vpr.cliente_id = $3::uuid)
       AND (
-        $3::text IS NULL
-        OR vpr.folio::text ILIKE '%' || $3 || '%'
-        OR COALESCE(vpr.cliente_nombre, '') ILIKE '%' || $3 || '%'
+        $4::text IS NULL
+        OR vpr.folio::text ILIKE '%' || $4 || '%'
+        OR COALESCE(vpr.cliente_nombre, '') ILIKE '%' || $4 || '%'
       )
     ORDER BY vpr.folio ASC
-    LIMIT $4 OFFSET $5;
+    LIMIT $5 OFFSET $6;
   `;
 
-  const { rows } = await db.query(sql, [tipo, estado, q, limit, offset]);
+  const { rows } = await db.query(sql, [tipo, estado, cliente_id, q, limit, offset]);
 
   return rows;
 }

@@ -42,6 +42,11 @@ export async function getPedidosAdmin(req, res) {
     const estado = req.query.estado
       ? String(req.query.estado).trim().toUpperCase()
       : null;
+
+    const cliente_id = req.query.cliente_id
+      ? String(req.query.cliente_id).trim()
+      : null;
+
     const q = req.query.q ? String(req.query.q).trim() : null;
 
     const limit = toInt(req.query.limit, 50);
@@ -64,6 +69,7 @@ export async function getPedidosAdmin(req, res) {
     const data = await listPedidosAdmin(req.db, {
       tipo,
       estado,
+      cliente_id,
       q,
       limit,
       offset,

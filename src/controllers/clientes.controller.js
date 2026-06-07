@@ -10,6 +10,7 @@ import {
   deleteDireccion,
   abonarCreditoCliente,
   getMovimientosCredito,
+  setClientePuedeApartarInterna,
 } from "../models/clientes.model.js";
 
 export async function getClientes(req, res) {
@@ -37,13 +38,11 @@ export async function getCliente(req, res) {
     return res.json({ ok: true, data: { ...cliente, direcciones } });
   } catch (err) {
     console.error("getCliente error:", err);
-    return res
-      .status(500)
-      .json({
-        ok: false,
-        msg: "Error obteniendo cliente",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error obteniendo cliente",
+      detail: err.message,
+    });
   }
 }
 
@@ -76,13 +75,11 @@ export async function postCliente(req, res) {
     return res.status(201).json({ ok: true, data: created });
   } catch (err) {
     if (err.code === "23505")
-      return res
-        .status(409)
-        .json({
-          ok: false,
-          msg: "Teléfono o email duplicado",
-          detail: err.detail,
-        });
+      return res.status(409).json({
+        ok: false,
+        msg: "Teléfono o email duplicado",
+        detail: err.detail,
+      });
     console.error("postCliente error:", err);
     return res
       .status(500)
@@ -99,21 +96,17 @@ export async function patchCliente(req, res) {
     return res.json({ ok: true, data: updated });
   } catch (err) {
     if (err.code === "23505")
-      return res
-        .status(409)
-        .json({
-          ok: false,
-          msg: "Teléfono o email duplicado",
-          detail: err.detail,
-        });
-    console.error("patchCliente error:", err);
-    return res
-      .status(500)
-      .json({
+      return res.status(409).json({
         ok: false,
-        msg: "Error actualizando cliente",
-        detail: err.message,
+        msg: "Teléfono o email duplicado",
+        detail: err.detail,
       });
+    console.error("patchCliente error:", err);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error actualizando cliente",
+      detail: err.message,
+    });
   }
 }
 
@@ -135,13 +128,11 @@ export async function patchCredito(req, res) {
     return res.json({ ok: true, data: row });
   } catch (err) {
     console.error("patchCredito error:", err);
-    return res
-      .status(500)
-      .json({
-        ok: false,
-        msg: "Error actualizando crédito",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error actualizando crédito",
+      detail: err.message,
+    });
   }
 }
 
@@ -170,9 +161,11 @@ export async function postAbonoCredito(req, res) {
   try {
     const id = String(req.params.id);
     const { monto, metodo_pago, referencia_externa } = req.body || {};
-    
+
     if (!monto || Number(monto) <= 0) {
-      return res.status(400).json({ ok: false, msg: "Monto inválido o requerido" });
+      return res
+        .status(400)
+        .json({ ok: false, msg: "Monto inválido o requerido" });
     }
 
     const row = await abonarCreditoCliente(req.db, id, { monto, metodo_pago });
@@ -196,12 +189,10 @@ export async function postDireccion(req, res) {
     const clienteId = String(req.params.id);
     const { calle, ciudad, estado, codigo_postal } = req.body || {};
     if (!calle || !ciudad || !estado || !codigo_postal) {
-      return res
-        .status(400)
-        .json({
-          ok: false,
-          msg: "calle, ciudad, estado y codigo_postal son requeridos",
-        });
+      return res.status(400).json({
+        ok: false,
+        msg: "calle, ciudad, estado y codigo_postal son requeridos",
+      });
     }
 
     const created = await createDireccion(req.db, clienteId, req.body || {});
@@ -227,13 +218,11 @@ export async function patchDireccionPrincipal(req, res) {
     return res.json({ ok: true, data: row });
   } catch (err) {
     console.error("patchDireccionPrincipal error:", err);
-    return res
-      .status(500)
-      .json({
-        ok: false,
-        msg: "Error asignando principal",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error asignando principal",
+      detail: err.message,
+    });
   }
 }
 
@@ -250,12 +239,74 @@ export async function deleteDireccionById(req, res) {
     return res.json({ ok: true, msg: "Dirección eliminada" });
   } catch (err) {
     console.error("deleteDireccionById error:", err);
-    return res
-      .status(500)
-      .json({
+    return res.status(500).json({
+      ok: false,
+      msg: "Error eliminando dirección",
+      detail: err.message,
+    });
+  }
+}
+
+export async function patchClientePuedeApartar(req, res) {
+  try {
+    if (!req.db) {
+      return res.status(500).json({
         ok: false,
-        msg: "Error eliminando dirección",
-        detail: err.message,
+        message: "DB context no configurado (req.db)",
       });
+    }
+
+    const id = String(req.params.id || "").trim();
+    const { puede_apartar } = req.body || {};
+
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        message: "id del cliente requerido",
+      });
+    }
+
+    if (typeof puede_apartar !== "boolean") {
+      return res.status(400).json({
+        ok: false,
+        message: "puede_apartar debe ser boolean",
+      });
+    }
+
+    const updated = await setClientePuedeApartarInterna(
+      req.db,
+      id,
+      puede_apartar,
+    );
+
+    if (!updated) {
+      return res.status(404).json({
+        ok: false,
+        message: "Cliente no encontrado",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      message: puede_apartar
+        ? "Cliente autorizado para apartados"
+        : "Cliente desautorizado para apartados",
+      data: updated,
+    });
+  } catch (err) {
+    console.error("patchClientePuedeApartar error:", err);
+
+    if (err.status) {
+      return res.status(err.status).json({
+        ok: false,
+        message: err.message,
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error actualizando permiso de apartado",
+      detail: err.message,
+    });
   }
 }

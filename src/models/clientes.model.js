@@ -337,3 +337,47 @@ export async function deleteDireccion(db, clienteId, direccionId) {
   );
   return rows[0] || null;
 }
+
+export async function setClientePuedeApartarInterna(db, id, puede_apartar) {
+  if (puede_apartar === false) {
+    const activosSql = `
+      SELECT COUNT(*)::int AS total
+      FROM ventas.pedidos
+      WHERE cliente_id = $1
+        AND tipo = 'APARTADO'
+        AND estado = 'ACTIVO';
+    `;
+
+    const activosResult = await db.query(activosSql, [id]);
+    const totalActivos = Number(activosResult.rows[0]?.total ?? 0);
+
+    if (totalActivos > 0) {
+      const error = new Error(
+        "No se puede desactivar apartados porque el cliente tiene apartados activos",
+      );
+      error.status = 409;
+      throw error;
+    }
+  }
+  
+  const sql = `
+    UPDATE clientes.clientes
+    SET puede_apartar = $2
+    WHERE id = $1
+    RETURNING
+      id,
+      nombres,
+      apellido_paterno,
+      apellido_materno,
+      telefono,
+      email,
+      activo,
+      tiene_credito,
+      limite_credito,
+      saldo_deudor,
+      puede_apartar;
+  `;
+
+  const { rows } = await db.query(sql, [id, puede_apartar]);
+  return rows[0] || null;
+}
