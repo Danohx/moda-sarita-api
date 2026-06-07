@@ -6,7 +6,7 @@
       "dest": "/api/index.js"
     }
   ],
-  "cron": [
+  "crons": [
     {
       "path": "/api/pedidos/vencer-expirados",
       "schedule": "0 6 * * *"
