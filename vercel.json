@@ -5,5 +5,11 @@
       "src": "/(.*)",
       "dest": "/api/index.js"
     }
+  ],
+  "cron": [
+    {
+      "path": "/api/pedidos/vencer-expirados",
+      "schedule": "0 6 * * *"
+    }
   ]
 }

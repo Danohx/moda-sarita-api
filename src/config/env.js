@@ -11,6 +11,7 @@ const required = [
   "CLOUDINARY_API_KEY",
   "CLOUDINARY_API_SECRET",
   "CLOUDINARY_FOLDER",
+  "CRON_SECRET",
 ];
 
 for (const k of required) {

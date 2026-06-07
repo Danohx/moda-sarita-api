@@ -354,7 +354,7 @@ export async function crearApartado(
         cliente_id,
         vendedor_id,
         tipo,
-        "APARTADO",
+        "ACTIVO",
         subtotal,
         total,
         fecha_limite_apartado || null,
