@@ -1,11 +1,21 @@
 export async function listExistencias(
   db,
-  { q, categoriaId, soloBajoStock, limit, offset },
+  { q, categoriaId, soloBajoStock, varianteId, productoId, limit, offset },
 ) {
   const params = [];
   let i = 1;
 
   const where = ["producto_activo = TRUE", "variante_activo = TRUE"];
+
+  if (varianteId) {
+    params.push(varianteId);
+    where.push(`variante_id = $${i++}`);
+  }
+
+  if (productoId) {
+    params.push(productoId);
+    where.push(`producto_id = $${i++}`);
+  }
 
   if (categoriaId) {
     params.push(categoriaId);
@@ -26,6 +36,16 @@ export async function listExistencias(
   if (soloBajoStock) {
     where.push("bajo_stock = TRUE");
   }
+
+  const whereClause = where.join(" AND ");
+
+  const countSql = `
+    SELECT COUNT(*) AS total
+    FROM inventario.v_existencias_detalle
+    WHERE ${whereClause};
+  `;
+  const { rows: countRows } = await db.query(countSql, params);
+  const total = Number(countRows[0].total);
 
   params.push(limit);
   const limitParam = i++;
@@ -63,7 +83,13 @@ export async function listExistencias(
   `;
 
   const { rows } = await db.query(sql, params);
-  return rows;
+  return {
+    items: rows,
+    total,
+    limit,
+    offset,
+    hasMore: offset + rows.length < total,
+  };
 }
 
 export async function getStockByVariante(db, varianteId) {

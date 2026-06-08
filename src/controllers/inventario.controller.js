@@ -17,6 +17,12 @@ export async function getExistencias(req, res) {
     const categoriaId = req.query.categoriaId
       ? Number(req.query.categoriaId)
       : null;
+    const varianteId = req.query.varianteId
+      ? String(req.query.varianteId)
+      : null;
+    const productoId = req.query.productoId
+      ? String(req.query.productoId)
+      : null;
     const soloBajoStock = String(req.query.soloBajoStock || "false") === "true";
     const limit = toInt(req.query.limit, 50);
     const offset = toInt(req.query.offset, 0);
@@ -36,12 +42,23 @@ export async function getExistencias(req, res) {
     const data = await listExistencias(req.db, {
       q,
       categoriaId,
+      varianteId,
+      productoId,
       soloBajoStock,
       limit,
       offset,
     });
 
-    return res.json({ ok: true, data });
+    return res.json({
+      ok: true,
+      data: data.items,
+      pagination: {
+        total: data.total,
+        limit: data.limit,
+        offset: data.offset,
+        hasMore: data.hasMore,
+      },
+    });
   } catch (err) {
     console.error("getExistencias error:", err);
     return res.status(500).json({
