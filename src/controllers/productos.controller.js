@@ -6,8 +6,12 @@ import {
   updateProducto,
   setProductoStatus,
   setProductoDestacado,
-  getProductoAdminByIdModel
+  getProductoAdminByIdModel,
 } from "../models/productos.model.js";
+import {
+  getParametroBool,
+  getParametroNumber,
+} from "../services/configuracion.service.js";
 
 function toBoolOrNull(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -188,6 +192,21 @@ export async function postProducto(req, res) {
     const talla_id = toIntOrNull(variante_base?.talla_id);
     const color_id = toIntOrNull(variante_base?.color_id);
 
+    const aplicarStockMinimoGeneral = await getParametroBool(
+      req.db,
+      "inventario.aplicar_stock_minimo_en_nuevos_productos",
+      true,
+    );
+
+    const stockMinimoGeneral = await getParametroNumber(
+      req.db,
+      "inventario.stock_minimo_general",
+      5,
+    );
+
+    const stockMinimoFinal =
+      stock_minimo ?? (aplicarStockMinimoGeneral ? stockMinimoGeneral : 5);
+
     if (!sku || sku.length < 2) {
       return res.status(400).json({
         ok: false,
@@ -254,7 +273,7 @@ export async function postProducto(req, res) {
         precio_costo,
         stock_fisico: stock_fisico ?? 0,
         stock_apartado: stock_apartado ?? 0,
-        stock_minimo: stock_minimo ?? 5,
+        stock_minimo: stockMinimoFinal,
         activo: variante_base?.activo !== false,
       },
     });
@@ -293,7 +312,7 @@ export async function patchProducto(req, res) {
       nombre:
         body.nombre !== undefined ? String(body.nombre).trim() || null : null,
       descripcion:
-        body.descripcion !== undefined ? body.descripcion ?? null : null,
+        body.descripcion !== undefined ? (body.descripcion ?? null) : null,
       categoria_id:
         body.categoria_id !== undefined
           ? body.categoria_id
@@ -315,7 +334,10 @@ export async function patchProducto(req, res) {
           : null,
     };
 
-    if (body.nombre !== undefined && (!payload.nombre || payload.nombre.length < 2)) {
+    if (
+      body.nombre !== undefined &&
+      (!payload.nombre || payload.nombre.length < 2)
+    ) {
       return res.status(400).json({
         ok: false,
         msg: "nombre debe tener mínimo 2 caracteres",

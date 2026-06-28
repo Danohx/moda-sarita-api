@@ -9,16 +9,64 @@ import {
   cerrarCorte,
   getCorteById,
   getHistorialCortes,
+  listarHistorialVentas,
+  getVentaHistorialDetalle,
 } from "../models/ventas.model.js";
+import { getConfigPOS } from "../services/configuracion.service.js";
+import { getPedidoDetalleAdmin } from "../models/pedidos.model.js";
+import { generarTicketPedidoPdfStream } from "../utils/pdf/ticketPedido.pdf.js";
+import { getConfigTicket } from "../services/configuracion.service.js";
+import { createAuditLog } from "../utils/audit.util.js";
+
+function formatMoney(value) {
+  return new Intl.NumberFormat("es-MX", {
+    style: "currency",
+    currency: "MXN",
+  }).format(Number(value ?? 0));
+}
+
+function getFolioVenta(row) {
+  return `VTA-${row?.folio ?? row?.id ?? "N/A"}`;
+}
+
+async function registrarAuditoriaVenta(db, payload) {
+  try {
+    await createAuditLog(db, payload);
+  } catch (err) {
+    console.error("registrarAuditoriaVenta error:", err);
+  }
+}
 
 export async function postVentaPOS(req, res) {
   try {
     const vendedor_id = req.user.id;
     const payload = req.body || {};
+    const posConfig = await getConfigPOS(req.db);
 
     const out = await crearVentaPOS(req.db, {
       ...payload,
       vendedor_id,
+      posConfig,
+    });
+
+    await registrarAuditoriaVenta(req.db, {
+      modulo: "ventas.pos",
+      accion: "create",
+      descripcion: `Se registró la venta ${getFolioVenta(out)} por ${formatMoney(
+        out.total,
+      )}.`,
+      usuarioId: req.user?.id ?? null,
+      metadata: {
+        venta_id: out.id,
+        folio: out.folio,
+        folio_label: getFolioVenta(out),
+        estado: out.estado,
+        cliente_id: out.cliente_id ?? null,
+        vendedor_id: out.vendedor_id ?? null,
+        total: Number(out.total ?? 0),
+        metodo_pago: req.body?.metodo_pago ?? null,
+        origen: "POS",
+      },
     });
 
     return res.status(201).json({ ok: true, data: out });
@@ -189,6 +237,21 @@ export async function postAbrirCorte(req, res) {
       fondo_inicial: fondoInicialNum,
     });
 
+    await registrarAuditoriaVenta(req.db, {
+      modulo: "ventas.corte_caja",
+      accion: "open",
+      descripcion: `Se abrió corte de caja con fondo inicial de ${formatMoney(
+        out.fondo_inicial,
+      )}.`,
+      usuarioId: req.user?.id ?? null,
+      metadata: {
+        corte_id: out.id,
+        usuario_id: out.usuario_id,
+        fondo_inicial: Number(out.fondo_inicial ?? 0),
+        inicio_turno: out.inicio_turno,
+      },
+    });
+
     return res.status(201).json({ ok: true, data: out });
   } catch (err) {
     console.error("postAbrirCorte error:", err);
@@ -233,6 +296,25 @@ export async function postCerrarCorte(req, res) {
       observaciones,
     });
 
+    await registrarAuditoriaVenta(req.db, {
+      modulo: "ventas.corte_caja",
+      accion: "close",
+      descripcion: `Se cerró corte de caja. Total contado: ${formatMoney(
+        out.total_real,
+      )}.`,
+      usuarioId: req.user?.id ?? null,
+      metadata: {
+        out_id: out.id,
+        usuario_id: out.usuario_id,
+        total_sistema: Number(out.total_sistema ?? 0),
+        total_real: Number(out.total_real ?? 0),
+        diferencia:
+          Number(out.total_real ?? 0) - Number(out.total_sistema ?? 0),
+        fin_turno: out.fin_turno,
+        observaciones: out.observaciones ?? null,
+      },
+    });
+
     return res.json({ ok: true, data: out });
   } catch (err) {
     console.error("postCerrarCorte error:", err);
@@ -254,15 +336,16 @@ export async function getHistorial(req, res) {
     return res.json({ ok: true, data: out });
   } catch (err) {
     console.error("getHistorial error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, msg: "Error consultando el historial de cortes", detail: err.message });
+    return res.status(500).json({
+      ok: false,
+      msg: "Error consultando el historial de cortes",
+      detail: err.message,
+    });
   }
 }
 
 export async function getCorteDetalle(req, res) {
   try {
-    // Lo convertimos a número tal como lo haces en postCerrarCorte
     const corte_id = Number(req.params.id);
 
     if (!Number.isFinite(corte_id)) {
@@ -270,17 +353,200 @@ export async function getCorteDetalle(req, res) {
     }
 
     const out = await getCorteById(req.db, corte_id);
-    
+
     return res.json({ ok: true, data: out });
   } catch (err) {
     console.error("getCorteDetalle error:", err);
-    
+
     if (err.code === "NOT_FOUND") {
       return res.status(404).json({ ok: false, msg: err.message });
     }
-    
-    return res
-      .status(500)
-      .json({ ok: false, msg: "Error consultando el detalle del corte", detail: err.message });
+
+    return res.status(500).json({
+      ok: false,
+      msg: "Error consultando el detalle del corte",
+      detail: err.message,
+    });
+  }
+}
+
+export async function getVentaTicketPdf(req, res) {
+  try {
+    if (!req.db) {
+      return res
+        .status(500)
+        .json({ ok: false, message: "DB context no configurado (req.db)" });
+    }
+
+    const ventaId = String(req.params.id || "").trim();
+
+    if (!ventaId) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "id de la venta requerido" });
+    }
+
+    const data = await getPedidoDetalleAdmin(req.db, ventaId);
+
+    if (!data) {
+      return res
+        .status(404)
+        .json({ ok: false, message: "Venta no encontrada" });
+    }
+
+    if (data.pedido.tipo !== "PUNTO_VENTA") {
+      return res.status(400).json({
+        ok: false,
+        message: "El pedido no es una venta de punto de venta",
+      });
+    }
+
+    const { pedido, detalles, pagos } = data;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="ticket-VTA-${pedido.folio}.pdf"`,
+    );
+
+    const ticketConfig = await getConfigTicket(req.db);
+
+    const pdf = generarTicketPedidoPdfStream({
+      pedido,
+      detalles,
+      pagos,
+      ticketConfig,
+    });
+
+    const modoTicket = String(req.query.modo || "reimpresion").trim();
+
+    const esGeneracionInicial = modoTicket === "generacion";
+
+    const accionAuditoria = esGeneracionInicial
+      ? "ticket_generated"
+      : "ticket_reprint";
+
+    const descripcionAuditoria = esGeneracionInicial
+      ? `Se generó el ticket de la venta ${getFolioVenta(pedido)}.`
+      : `Se reimprimió el ticket de la venta ${getFolioVenta(pedido)}.`;
+
+    await registrarAuditoriaVenta(req.db, {
+      modulo: "ventas.pos",
+      accion: accionAuditoria,
+      descripcion: descripcionAuditoria,
+      usuarioId: req.user?.id ?? null,
+      metadata: {
+        venta_id: pedido.id,
+        folio: pedido.folio,
+        folio_label: getFolioVenta(pedido),
+        total: Number(pedido.total ?? 0),
+        estado: pedido.estado,
+        origen: esGeneracionInicial,
+      },
+    });
+
+    pdf.pipe(res);
+  } catch (err) {
+    if (err.code === "22P02") {
+      return res
+        .status(400)
+        .json({ ok: false, message: "Formato de ID inválido" });
+    }
+    console.error("getVentaTicketPdf error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Error generando ticket PDF",
+      detail: err.message,
+    });
+  }
+}
+
+export async function getHistorialVentasPOS(req, res) {
+  try {
+    if (!req.db) {
+      return res.status(500).json({
+        ok: false,
+        message: "DB context no configurado (req.db)",
+      });
+    }
+
+    const result = await listarHistorialVentas(req.db, {
+      q: req.query.q || null,
+      estado: req.query.estado || null,
+      fecha_inicio: req.query.fecha_inicio || null,
+      fecha_fin: req.query.fecha_fin || null,
+      metodo: req.query.metodo || null,
+      vendedor_id: req.query.vendedor_id || null,
+      cliente_id: req.query.cliente_id || null,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+
+    return res.json({
+      ok: true,
+      data: result.rows,
+      pagination: {
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      },
+    });
+  } catch (err) {
+    console.error("getHistorialVentasPOS error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error obteniendo historial de ventas",
+      detail: err.message,
+    });
+  }
+}
+
+export async function getVentaHistorialPOSById(req, res) {
+  try {
+    if (!req.db) {
+      return res.status(500).json({
+        ok: false,
+        message: "DB context no configurado (req.db)",
+      });
+    }
+
+    const ventaId = String(req.params.id || "").trim();
+
+    if (!ventaId) {
+      return res.status(400).json({
+        ok: false,
+        message: "id de venta requerido",
+      });
+    }
+
+    const data = await getVentaHistorialDetalle(req.db, ventaId);
+
+    if (!data) {
+      return res.status(404).json({
+        ok: false,
+        message: "Venta no encontrada",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      data,
+    });
+  } catch (err) {
+    if (err.code === "22P02") {
+      return res.status(400).json({
+        ok: false,
+        message: "Formato de ID inválido",
+      });
+    }
+
+    console.error("getVentaHistorialPOSById error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error obteniendo detalle de venta",
+      detail: err.message,
+    });
   }
 }

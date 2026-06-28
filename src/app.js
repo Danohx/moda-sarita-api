@@ -21,6 +21,8 @@ import monitoringRoutes from "./routes/monitoring.routes.js";
 import maintenanceRoutes from "./routes/maintenance.routes.js";
 import auditLogsRoutes from "./routes/auditLogs.routes.js";
 import pedidosRoutes from "./routes/pedidos.routes.js";
+import configuracionRoutes from "./routes/configuracion.routes.js";
+import reportesRoutes from "./routes/reportes.routes.js";
 
 const app = express();
 
@@ -72,5 +74,7 @@ app.use("/api/monitoring", monitoringRoutes);
 app.use("/api/maintenance", maintenanceRoutes);
 app.use("/api/audit-logs", auditLogsRoutes);
 app.use("/api/pedidos", pedidosRoutes);
+app.use("/api/configuracion", configuracionRoutes);
+app.use("/api/reportes", reportesRoutes);
 
 export default app;

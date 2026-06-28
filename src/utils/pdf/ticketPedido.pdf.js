@@ -49,6 +49,44 @@ function formatConcepto(value) {
   return map[value] || value || "Pago";
 }
 
+function formatTipo(value) {
+  const map = {
+    PUNTO_VENTA: "En tienda",
+    APARTADO: "Apartado",
+    WEB: "Pedido web",
+  };
+  return map[value] || value || "N/A";
+}
+
+function ticketWidthToPoints(anchoMm = 80) {
+  const mm = Number(anchoMm);
+
+  if (mm <= 58) return 164; // 58mm aprox
+  return 226; // 80mm aprox
+}
+
+function getTicketConfig(ticketConfig = {}) {
+  return {
+    nombreTienda: ticketConfig.nombreTienda || "Moda Sarita",
+    telefono: ticketConfig.telefono || "",
+    direccion: ticketConfig.direccion || "",
+    mostrarVendedor: ticketConfig.mostrarVendedor !== false,
+    mostrarCliente: ticketConfig.mostrarCliente !== false,
+    mensajeFinal: ticketConfig.mensajeFinal || "¡Gracias por su compra!",
+    politicaCambios: ticketConfig.politicaCambios || "",
+    politicaApartado: ticketConfig.politicaApartado || "",
+    anchoMm: ticketConfig.anchoMm || 80,
+  };
+}
+
+function textIfExists(doc, value, options = {}) {
+  const text = String(value || "").trim();
+
+  if (!text) return;
+
+  doc.text(text, options);
+}
+
 function line(doc) {
   doc
     .moveTo(12, doc.y)
@@ -71,9 +109,16 @@ function row(doc, label, value) {
     .text(` ${value ?? "N/A"}`);
 }
 
-export function generarTicketPedidoPdfStream({ pedido, detalles, pagos }) {
+export function generarTicketPedidoPdfStream({
+  pedido,
+  detalles,
+  pagos,
+  ticketConfig = {},
+}) {
+  const config = getTicketConfig(ticketConfig);
+
   const doc = new PDFDocument({
-    size: [226.77, 900], // 80mm aprox.
+    size: [ticketWidthToPoints(config.anchoMm), 900],
     margins: {
       top: 12,
       bottom: 12,
@@ -90,7 +135,12 @@ export function generarTicketPedidoPdfStream({ pedido, detalles, pagos }) {
   doc
     .font("Helvetica-Bold")
     .fontSize(13)
-    .text("MODA SARITA", { align: "center" });
+    .text(config.nombreTienda, { align: "center" });
+
+  doc.font("Helvetica").fontSize(7);
+
+  textIfExists(doc, config.telefono, { align: "center" });
+  textIfExists(doc, config.direccion, { align: "center" });
 
   doc
     .font("Helvetica")
@@ -108,10 +158,18 @@ export function generarTicketPedidoPdfStream({ pedido, detalles, pagos }) {
 
   doc.moveDown(0.5);
 
-  row(doc, "Tipo:", pedido.tipo);
+  row(doc, "Tipo:", formatTipo(pedido.tipo));
+
   row(doc, "Estado:", formatEstado(pedido.estado));
-  row(doc, "Cliente:", pedido.cliente_nombre || "Cliente no asignado");
-  row(doc, "Vendedor:", pedido.vendedor_nombre || "N/A");
+
+  if (config.mostrarCliente && pedido.cliente_nombre) {
+    row(doc, "Cliente:", pedido.cliente_nombre);
+  }
+
+  if (config.mostrarVendedor) {
+    row(doc, "Vendedor:", pedido.vendedor_nombre || "N/A");
+  }
+
   row(doc, "Fecha:", formatDate(pedido.fecha_creacion));
 
   if (pedido.fecha_limite_apartado) {
@@ -245,11 +303,40 @@ export function generarTicketPedidoPdfStream({ pedido, detalles, pagos }) {
   doc.moveDown(0.8);
   line(doc);
 
+  // Políticas
+  if (config.politicaCambios) {
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(7)
+      .text("POLÍTICA DE CAMBIOS", { align: "center" });
+
+    doc
+      .font("Helvetica")
+      .fontSize(6)
+      .text(config.politicaCambios, { align: "center" });
+
+    doc.moveDown(0.5);
+  }
+
+  if (pedido.tipo === "APARTADO" && config.politicaApartado) {
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(7)
+      .text("POLÍTICA DE APARTADO", { align: "center" });
+
+    doc
+      .font("Helvetica")
+      .fontSize(6)
+      .text(config.politicaApartado, { align: "center" });
+
+    doc.moveDown(0.5);
+  }
+
   // Footer
   doc
     .font("Helvetica")
     .fontSize(7)
-    .text("Gracias por su compra", { align: "center" });
+    .text(config.mensajeFinal, { align: "center" });
 
   doc
     .font("Helvetica")
@@ -267,9 +354,12 @@ export function generarTicketPagoPdfStream({
   total_apartado,
   saldo_antes,
   saldo_despues,
+  ticketConfig = {},
 }) {
+  const config = getTicketConfig(ticketConfig);
+
   const doc = new PDFDocument({
-    size: [226.77, 620],
+    size: [ticketWidthToPoints(config.anchoMm), 620],
     margins: {
       top: 12,
       bottom: 12,
@@ -284,7 +374,12 @@ export function generarTicketPagoPdfStream({
   doc
     .font("Helvetica-Bold")
     .fontSize(13)
-    .text("MODA SARITA", { align: "center" });
+    .text(config.nombreTienda, { align: "center" });
+
+  doc.font("Helvetica").fontSize(7);
+
+  textIfExists(doc, config.telefono, { align: "center" });
+  textIfExists(doc, config.direccion, { align: "center" });
 
   doc.font("Helvetica").fontSize(7).text("Ticket de pago", { align: "center" });
 
@@ -298,8 +393,14 @@ export function generarTicketPagoPdfStream({
 
   doc.moveDown(0.5);
 
-  row(doc, "Cliente:", pedido.cliente_nombre || "Cliente no asignado");
-  row(doc, "Vendedor:", pedido.vendedor_nombre || "N/A");
+  if (config.mostrarCliente) {
+    row(doc, "Cliente:", pedido.cliente_nombre || "Cliente no asignado");
+  }
+
+  if (config.mostrarVendedor) {
+    row(doc, "Vendedor:", pedido.vendedor_nombre || "N/A");
+  }
+
   row(doc, "Estado pedido:", formatEstado(pedido.estado));
   row(doc, "Fecha pago:", formatDate(pago.fecha_pago));
 
@@ -332,8 +433,6 @@ export function generarTicketPagoPdfStream({
   doc.moveDown(0.5);
   line(doc);
 
-  const esLiquidacion = pago.concepto === "LIQUIDACION_APARTADO";
-
   row(doc, "Total del apartado:", money(total_apartado ?? pedido.total));
   row(doc, "Saldo antes del pago:", money(saldo_antes));
   row(doc, "Pago aplicado:", money(pago.monto));
@@ -342,10 +441,19 @@ export function generarTicketPagoPdfStream({
   doc.moveDown(0.8);
   line(doc);
 
+  if (pedido.tipo === "APARTADO" && config.politicaApartado) {
+    doc
+      .font("Helvetica")
+      .fontSize(6)
+      .text(config.politicaApartado, { align: "center" });
+
+    doc.moveDown(0.5);
+  }
+
   doc
     .font("Helvetica")
     .fontSize(7)
-    .text("Gracias por su pago", { align: "center" });
+    .text(config.mensajeFinal, { align: "center" });
 
   doc
     .font("Helvetica")

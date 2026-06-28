@@ -160,3 +160,72 @@ moda-sarita-api
 └─ vercel.json
 
 ```
+```
+moda-sarita-api
+├─ api
+│  └─ index.js
+├─ index.js
+├─ nodemon.json
+├─ package-lock.json
+├─ package.json
+├─ README.md
+├─ src
+│  ├─ app.js
+│  ├─ config
+│  │  ├─ cloudinary.js
+│  │  ├─ db.js
+│  │  ├─ env.js
+│  │  └─ mailer.config.js
+│  ├─ controllers
+│  │  ├─ auditLogs.controller.js
+│  │  ├─ auth.controller.js
+│  │  ├─ backups.controller.js
+│  │  ├─ categorias.controller.js
+│  │  ├─ clientes.controller.js
+│  │  ├─ colores.controller.js
+│  │  ├─ cupones.controller.js
+│  │  ├─ dashboard.controller.js
+│  │  ├─ inventario.controller.js
+│  │  ├─ maintenance.controller.js
+│  │  ├─ monitoring.controller.js
+│  │  ├─ pedidos.controller.js
+│  │  ├─ productoDetalle.controller.js
+│  │  ├─ productoImagenes.controller.js
+│  │  ├─ productos.controller.js
+│  │  ├─ proveedores.controller.js
+│  │  ├─ security.controller.js
+│  │  ├─ suscripcion.controller.js
+│  │  ├─ tallas.controller.js
+│  │  ├─ variantes.controller.js
+│  │  └─ ventas.controller.js
+│  ├─ jobs
+│  │  └─ vencerApartados.job.js
+│  ├─ middleware
+│  │  ├─ dbContext.js
+│  │  ├─ rateLimit.js
+│  │  ├─ seguridad.js
+│  │  └─ upload.js
+│  ├─ models
+│  │  ├─ categorias.model.js
+│  │  ├─ clientes.model.js
+│  │  ├─ colores.model.js
+│  │  ├─ cupones.model.js
+│  │  ├─ dashboard.model.js
+│  │  ├─ inventario.model.js
+│  │  ├─ pedidos.model.js
+│  │  ├─ productoDetalle.model.js
+│  │  ├─ productoImagenes.model.js
+│  │  ├─ productos.model.js
+│  │  ├─ proveedores.model.js
+│  │  ├─ suscripcion.model.js
+│  │  ├─ tallas.model.js
+│  │  ├─ variantes.model.js
+│  │  └─ ventas.model.js
+│  └─ utils
+│     ├─ audit.util.js
+│     ├─ cloudinaryUpload.js
+│     └─ pdf
+│        └─ ticketPedido.pdf.js
+└─ vercel.json
+
+```

@@ -1,196 +1,784 @@
 import {
-  generate2FASecret,
   verify2FAToken,
   generate2FASecret as generateSecretLib,
 } from "../middleware/seguridad.js";
 
+import {
+  guardarSecreto2FA,
+  obtenerSecreto2FA,
+  habilitar2FAUsuario,
+  listarRoles,
+  listarRolesConPermisos,
+  crearRol,
+  actualizarRol,
+  listarPermisos,
+  obtenerPermisosRol,
+  asignarPermisosRol,
+  cambiarEstadoRol,
+  listarEmpleados,
+  crearEmpleado,
+  actualizarEmpleado,
+  cambiarEstadoEmpleado,
+  listarSesionesUsuario,
+  revocarSesionUsuario,
+  revocarOtrasSesionesUsuario,
+  obtenerEstadoSeguridadUsuario,
+} from "../models/security.model.js";
+
+const passwordRegex =
+  /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&.#_-])[A-Za-z\d@$!%*?&.#_-]{8,}$/;
+
+// ========================= 2FA =========================
+
 export const setup2FA = async (req, res) => {
-  const email = req.user.correo || req.user.email;
+  const email = req.user?.correo || req.user?.email;
+
+  if (!email) {
+    return res.status(400).json({
+      ok: false,
+      mensaje: "No se pudo identificar el correo del usuario.",
+    });
+  }
+
   const { base32, otpauth_url } = generateSecretLib(email);
 
   try {
-    const sql =
-      "UPDATE seguridad.usuarios SET tfa_secret = $1, tfa_enabled = FALSE WHERE email = $2";
+    const user = await guardarSecreto2FA(req.db, {
+      email,
+      secret: base32,
+    });
 
-    await req.db.query(sql, [base32, email]);
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        mensaje: "Usuario no encontrado.",
+      });
+    }
 
-    res.json({ otpauth_url });
+    return res.json({
+      ok: true,
+      otpauth_url,
+    });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ mensaje: "Error al guardar secreto en DB" });
+    console.error("setup2FA error:", err);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error al guardar secreto 2FA.",
+      detail: err.message,
+    });
   }
 };
 
 export const enable2FA = async (req, res) => {
-  const { token } = req.body;
-  const email = req.user.correo || req.user.email;
+  const { token } = req.body || {};
+  const email = req.user?.correo || req.user?.email;
+
+  if (!email) {
+    return res.status(400).json({
+      ok: false,
+      mensaje: "No se pudo identificar el correo del usuario.",
+    });
+  }
+
+  if (!token) {
+    return res.status(400).json({
+      ok: false,
+      mensaje: "El código OTP es requerido.",
+    });
+  }
 
   try {
-    const sql = "SELECT tfa_secret FROM seguridad.usuarios WHERE email = $1";
-    const { rows } = await req.db.query(sql, [email]);
+    const user = await obtenerSecreto2FA(req.db, { email });
 
-    if (rows.length === 0) {
-      return res.status(404).json({ mensaje: "Usuario no encontrado" });
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        mensaje: "Usuario no encontrado.",
+      });
     }
 
-    const { tfa_secret } = rows[0];
-
-    if (!tfa_secret) {
-      return res
-        .status(400)
-        .json({ mensaje: "Primero debes configurar el 2FA (Escanea el QR)." });
+    if (!user.tfa_secret) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "Primero debes configurar el 2FA escaneando el QR.",
+      });
     }
 
-    const verified = verify2FAToken(tfa_secret, token);
+    const verified = verify2FAToken(user.tfa_secret, token);
 
-    if (verified) {
-      const updateSql =
-        "UPDATE seguridad.usuarios SET tfa_enabled = TRUE WHERE email = $1";
-      await req.db.query(updateSql, [email]);
-
-      res.json({ success: true, message: "2FA habilitado correctamente." });
-    } else {
-      res
-        .status(401)
-        .json({ success: false, message: "Código OTP incorrecto." });
+    if (!verified) {
+      return res.status(401).json({
+        ok: false,
+        success: false,
+        mensaje: "Código OTP incorrecto.",
+      });
     }
+
+    await habilitar2FAUsuario(req.db, { email });
+
+    return res.json({
+      ok: true,
+      success: true,
+      message: "2FA habilitado correctamente.",
+    });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ mensaje: "Error al procesar 2FA." });
+    console.error("enable2FA error:", err);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error al procesar 2FA.",
+      detail: err.message,
+    });
   }
 };
+
+// ========================= ROLES =========================
 
 export const listRoles = async (req, res) => {
   try {
-    const { rows } = await req.db.query(
-      `select id, nombre, descripcion
-       from seguridad.roles_sistema
-       order by id asc`,
-    );
-    return res.json({ ok: true, roles: rows });
+    const withPermisos = req.query?.withPermisos === "true";
+
+    const roles = withPermisos
+      ? await listarRolesConPermisos(req.db)
+      : await listarRoles(req.db);
+
+    return res.json({
+      ok: true,
+      roles,
+    });
   } catch (err) {
     console.error("listRoles error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, mensaje: "Error al listar roles." });
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error al listar roles.",
+      detail: err.message,
+    });
   }
 };
 
+export const createRole = async (req, res) => {
+  try {
+    const { nombre, descripcion = null, permisos = [] } = req.body || {};
+
+    if (!nombre || String(nombre).trim().length < 2) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "El nombre del rol es requerido.",
+      });
+    }
+
+    if (!Array.isArray(permisos)) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "permisos debe ser un arreglo de slugs.",
+      });
+    }
+
+    const data = await crearRol(req.db, {
+      nombre,
+      descripcion,
+      permisos,
+      usuarioId: req.user?.id ?? null,
+    });
+
+    return res.status(201).json({
+      ok: true,
+      mensaje: "Rol creado correctamente.",
+      data,
+    });
+  } catch (err) {
+    if (err.code === "23505") {
+      return res.status(409).json({
+        ok: false,
+        mensaje: "Ya existe un rol con ese nombre.",
+      });
+    }
+
+    if (err.code === "PERMISOS_INVALIDOS") {
+      return res.status(400).json({
+        ok: false,
+        mensaje: err.message,
+        faltantes: err.faltantes,
+      });
+    }
+
+    console.error("createRole error:", err);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error creando rol.",
+      detail: err.message,
+    });
+  }
+};
+
+export const updateRole = async (req, res) => {
+  try {
+    const rolId = Number(req.params.rolId);
+    const { nombre, descripcion = null } = req.body || {};
+
+    if (!Number.isInteger(rolId)) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "rolId inválido.",
+      });
+    }
+
+    if (!nombre || String(nombre).trim().length < 2) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "El nombre del rol es requerido.",
+      });
+    }
+
+    const data = await actualizarRol(req.db, rolId, {
+      nombre,
+      descripcion,
+      usuarioId: req.user?.id ?? null,
+    });
+
+    if (!data) {
+      return res.status(404).json({
+        ok: false,
+        mensaje: "Rol no encontrado.",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      mensaje: "Rol actualizado correctamente.",
+      data,
+    });
+  } catch (err) {
+    if (err.code === "23505") {
+      return res.status(409).json({
+        ok: false,
+        mensaje: "Ya existe un rol con ese nombre.",
+      });
+    }
+
+    if (
+      String(err.message || "").includes("rol administrativo base") ||
+      String(err.message || "").includes("degradar")
+    ) {
+      return res.status(409).json({
+        ok: false,
+        mensaje: err.message,
+      });
+    }
+
+    console.error("updateRole error:", err);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error actualizando rol.",
+      detail: err.message,
+    });
+  }
+};
+
+// ========================= PERMISOS =========================
+
 export const listPermisos = async (req, res) => {
   try {
-    const { rows } = await req.db.query(
-      `select slug, nombre_legible, descripcion
-       from seguridad.catalogo_permisos
-       order by slug asc`,
-    );
-    return res.json({ ok: true, permisos: rows });
+    const permisos = await listarPermisos(req.db);
+
+    return res.json({
+      ok: true,
+      permisos,
+    });
   } catch (err) {
     console.error("listPermisos error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, mensaje: "Error al listar permisos." });
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error al listar permisos.",
+      detail: err.message,
+    });
   }
 };
 
 export const getPermisosRol = async (req, res) => {
-  const { rolId } = req.params;
-
   try {
-    const { rows } = await req.db.query(
-      `select ppr.permiso_slug
-       from seguridad.permisos_por_rol ppr
-       where ppr.rol_id = $1
-       order by ppr.permiso_slug asc`,
-      [rolId],
-    );
+    const rolId = Number(req.params.rolId);
+
+    if (!Number.isInteger(rolId)) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "rolId inválido.",
+      });
+    }
+
+    const permisos = await obtenerPermisosRol(req.db, rolId);
 
     return res.json({
       ok: true,
       rolId,
-      permisos: rows.map((r) => r.permiso_slug),
+      permisos,
     });
   } catch (err) {
     console.error("getPermisosRol error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, mensaje: "Error al consultar permisos del rol." });
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error al consultar permisos del rol.",
+      detail: err.message,
+    });
   }
 };
 
 export const setPermisosRol = async (req, res) => {
-  const { rolId } = req.params;
-  const { permisos } = req.body;
-
-  if (!Array.isArray(permisos)) {
-    return res
-      .status(400)
-      .json({ ok: false, mensaje: "permisos debe ser un arreglo de slugs." });
-  }
-
-  const uniquePerms = [
-    ...new Set(permisos.map((p) => String(p).trim()).filter(Boolean)),
-  ];
-
-  const client = await req.db.connect();
   try {
-    await client.query("begin");
+    const rolId = Number(req.params.rolId);
+    const { permisos } = req.body || {};
 
-    const rolRes = await client.query(
-      `select id, nombre from seguridad.roles_sistema where id = $1`,
-      [rolId],
-    );
-    if (rolRes.rows.length === 0) {
-      await client.query("rollback");
-      return res.status(404).json({ ok: false, mensaje: "Rol no encontrado." });
+    if (!Number.isInteger(rolId)) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "rolId inválido.",
+      });
     }
 
-    if (uniquePerms.length > 0) {
-      const catRes = await client.query(
-        `select slug from seguridad.catalogo_permisos where slug = any($1::varchar[])`,
-        [uniquePerms],
-      );
-      const existentes = new Set(catRes.rows.map((r) => r.slug));
-      const faltantes = uniquePerms.filter((p) => !existentes.has(p));
-
-      if (faltantes.length > 0) {
-        await client.query("rollback");
-        return res.status(400).json({
-          ok: false,
-          mensaje: "Hay permisos que no existen en el catálogo.",
-          faltantes,
-        });
-      }
+    if (!Array.isArray(permisos)) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "permisos debe ser un arreglo de slugs.",
+      });
     }
 
-    await client.query(
-      `delete from seguridad.permisos_por_rol where rol_id = $1`,
-      [rolId],
-    );
-
-    for (const slug of uniquePerms) {
-      await client.query(
-        `insert into seguridad.permisos_por_rol (rol_id, permiso_slug)
-         values ($1, $2)
-         on conflict do nothing`,
-        [rolId, slug],
-      );
-    }
-
-    await client.query("commit");
+    const data = await asignarPermisosRol(req.db, rolId, {
+      permisos,
+      usuarioId: req.user?.id ?? null,
+    });
 
     return res.json({
       ok: true,
       mensaje: "Permisos actualizados.",
-      rolId,
-      permisos: uniquePerms,
+      rolId: data.rolId,
+      permisos: data.permisos,
     });
   } catch (err) {
-    await client.query("rollback");
+    if (err.code === "ROL_NO_ENCONTRADO") {
+      return res.status(404).json({
+        ok: false,
+        mensaje: err.message,
+      });
+    }
+
+    if (err.code === "PERMISOS_INVALIDOS") {
+      return res.status(400).json({
+        ok: false,
+        mensaje: err.message,
+        faltantes: err.faltantes,
+      });
+    }
+
     console.error("setPermisosRol error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, mensaje: "Error al asignar permisos al rol." });
-  } finally {
-    client.release();
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error al asignar permisos al rol.",
+      detail: err.message,
+    });
   }
 };
+
+export const updateRoleStatus = async (req, res) => {
+  try {
+    const rolId = Number(req.params.rolId);
+    const { activo } = req.body || {};
+
+    if (!Number.isInteger(rolId)) {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "rolId inválido.",
+      });
+    }
+
+    if (typeof activo !== "boolean") {
+      return res.status(400).json({
+        ok: false,
+        mensaje: "activo debe ser boolean.",
+      });
+    }
+
+    const data = await cambiarEstadoRol(req.db, rolId, {
+      activo,
+      usuarioId: req.user?.id ?? null,
+    });
+
+    if (!data) {
+      return res.status(404).json({
+        ok: false,
+        mensaje: "Rol no encontrado.",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      mensaje: activo
+        ? "Rol activado correctamente."
+        : "Rol desactivado correctamente.",
+      data,
+    });
+  } catch (err) {
+    console.error("updateRoleStatus error:", err);
+
+    if (err.code === "ROL_NO_ENCONTRADO") {
+      return res.status(404).json({
+        ok: false,
+        mensaje: err.message,
+      });
+    }
+
+    if (
+      err.code === "ROL_PROTEGIDO" ||
+      err.code === "ROL_CON_USUARIOS_ACTIVOS"
+    ) {
+      return res.status(409).json({
+        ok: false,
+        mensaje: err.message,
+        totalUsuariosActivos: err.totalUsuariosActivos,
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      mensaje: "No se pudo cambiar el estado del rol.",
+      detail: err.message,
+    });
+  }
+};
+
+export async function getEmpleados(req, res) {
+  try {
+    const q = req.query.q ? String(req.query.q).trim() : null;
+    const includeInactive = req.query.includeInactive !== "false";
+
+    const data = await listarEmpleados(req.db, {
+      q,
+      includeInactive,
+    });
+
+    return res.json({
+      ok: true,
+      data,
+    });
+  } catch (err) {
+    console.error("getEmpleados error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Error listando empleados",
+      detail: err.message,
+    });
+  }
+}
+
+export async function postEmpleado(req, res) {
+  try {
+    const {
+      nombres,
+      apellido_paterno,
+      apellido_materno = null,
+      email,
+      rol_id,
+      password_temporal,
+    } = req.body || {};
+
+    if (!nombres || String(nombres).trim().length < 2) {
+      return res.status(400).json({
+        ok: false,
+        message: "nombres es requerido",
+      });
+    }
+
+    if (!apellido_paterno || String(apellido_paterno).trim().length < 2) {
+      return res.status(400).json({
+        ok: false,
+        message: "apellido_paterno es requerido",
+      });
+    }
+
+    if (!email || !String(email).includes("@")) {
+      return res.status(400).json({
+        ok: false,
+        message: "email inválido o requerido",
+      });
+    }
+
+    if (!rol_id || !Number.isInteger(Number(rol_id))) {
+      return res.status(400).json({
+        ok: false,
+        message: "rol_id es requerido",
+      });
+    }
+
+    if (!password_temporal || !passwordRegex.test(String(password_temporal))) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          "La contraseña temporal debe tener mínimo 8 caracteres, mayúscula, minúscula, número y carácter especial.",
+      });
+    }
+
+    const data = await crearEmpleado(req.db, {
+      nombres,
+      apellido_paterno,
+      apellido_materno,
+      email,
+      rol_id: Number(rol_id),
+      password_temporal,
+      actorId: req.user?.id ?? null,
+    });
+
+    return res.status(201).json({
+      ok: true,
+      message: "Empleado creado correctamente",
+      data,
+    });
+  } catch (err) {
+    console.error("postEmpleado error:", err);
+
+    return res.status(err.status || 500).json({
+      ok: false,
+      message: err.status ? err.message : "Error creando empleado",
+      code: err.code,
+      detail: err.message,
+    });
+  }
+}
+
+export async function patchEmpleado(req, res) {
+  try {
+    const usuarioId = String(req.params.usuarioId || "").trim();
+
+    if (!usuarioId) {
+      return res.status(400).json({
+        ok: false,
+        message: "usuarioId requerido",
+      });
+    }
+
+    const payload = {};
+
+    if (req.body?.nombres !== undefined) {
+      payload.nombres = req.body.nombres;
+    }
+
+    if (req.body?.apellido_paterno !== undefined) {
+      payload.apellido_paterno = req.body.apellido_paterno;
+    }
+
+    if (req.body?.apellido_materno !== undefined) {
+      payload.apellido_materno = req.body.apellido_materno;
+    }
+
+    if (req.body?.email !== undefined) {
+      payload.email = req.body.email;
+    }
+
+    if (req.body?.rol_id !== undefined) {
+      payload.rol_id = Number(req.body.rol_id);
+    }
+
+    const data = await actualizarEmpleado(req.db, usuarioId, payload, {
+      actorId: req.user?.id ?? null,
+    });
+
+    return res.json({
+      ok: true,
+      message: "Empleado actualizado correctamente",
+      data,
+    });
+  } catch (err) {
+    console.error("patchEmpleado error:", err);
+
+    return res.status(err.status || 500).json({
+      ok: false,
+      message: err.status ? err.message : "Error actualizando empleado",
+      code: err.code,
+      detail: err.message,
+    });
+  }
+}
+
+export async function patchEmpleadoStatus(req, res) {
+  try {
+    const usuarioId = String(req.params.usuarioId || "").trim();
+    const { activo } = req.body || {};
+
+    if (!usuarioId) {
+      return res.status(400).json({
+        ok: false,
+        message: "usuarioId requerido",
+      });
+    }
+
+    if (typeof activo !== "boolean") {
+      return res.status(400).json({
+        ok: false,
+        message: "activo debe ser boolean",
+      });
+    }
+
+    const data = await cambiarEstadoEmpleado(req.db, usuarioId, {
+      activo,
+      usuarioId: req.user?.id ?? null,
+    });
+
+    return res.json({
+      ok: true,
+      message: activo
+        ? "Empleado activado correctamente"
+        : "Empleado desactivado correctamente",
+      data,
+    });
+  } catch (err) {
+    console.error("patchEmpleadoStatus error:", err);
+
+    return res.status(err.status || 500).json({
+      ok: false,
+      message: err.status ? err.message : "Error cambiando estado del empleado",
+      code: err.code,
+      detail: err.message,
+    });
+  }
+}
+
+// ========================= SESIONES DE SEGURIDAD =========================
+
+export async function getMisSesiones(req, res) {
+  try {
+    const usuarioId = req.user?.id;
+    const currentSid = req.user?.sid ?? null;
+
+    if (!usuarioId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Usuario no autenticado",
+      });
+    }
+
+    const data = await listarSesionesUsuario(req.db, usuarioId, {
+      currentSid,
+    });
+
+    return res.json({
+      ok: true,
+      data,
+    });
+  } catch (error) {
+    console.error("getMisSesiones error:", error);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error obteniendo sesiones",
+      detail: error.message,
+    });
+  }
+}
+
+export async function patchRevocarSesion(req, res) {
+  try {
+    const usuarioId = req.user?.id;
+    const currentSid = req.user?.sid ?? null;
+    const sessionId = String(req.params.sessionId || "").trim();
+
+    if (!usuarioId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Usuario no autenticado",
+      });
+    }
+
+    if (!sessionId) {
+      return res.status(400).json({
+        ok: false,
+        message: "sessionId requerido",
+      });
+    }
+
+    const data = await revocarSesionUsuario(req.db, sessionId, {
+      usuarioId,
+      currentSid,
+    });
+
+    return res.json({
+      ok: true,
+      message: "Sesión revocada correctamente",
+      data,
+    });
+  } catch (error) {
+    console.error("patchRevocarSesion error:", error);
+
+    return res.status(error.status || 500).json({
+      ok: false,
+      message: error.status ? error.message : "Error revocando sesión",
+      code: error.code,
+      detail: error.message,
+    });
+  }
+}
+
+export async function patchRevocarOtrasSesiones(req, res) {
+  try {
+    const usuarioId = req.user?.id;
+    const currentSid = req.user?.sid ?? null;
+
+    if (!usuarioId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Usuario no autenticado",
+      });
+    }
+
+    const data = await revocarOtrasSesionesUsuario(req.db, {
+      usuarioId,
+      currentSid,
+    });
+
+    return res.json({
+      ok: true,
+      message: "Sesiones revocadas correctamente",
+      data,
+    });
+  } catch (error) {
+    console.error("patchRevocarOtrasSesiones error:", error);
+
+    return res.status(error.status || 500).json({
+      ok: false,
+      message: error.status ? error.message : "Error revocando sesiones",
+      code: error.code,
+      detail: error.message,
+    });
+  }
+}
+
+export async function getEstadoSeguridad(req, res) {
+  try {
+    const usuarioId = req.user?.id;
+
+    if (!usuarioId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Usuario no autenticado",
+      });
+    }
+
+    const data = await obtenerEstadoSeguridadUsuario(req.db, usuarioId);
+
+    if (!data) {
+      return res.status(404).json({
+        ok: false,
+        message: "Usuario no encontrado",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      data,
+    });
+  } catch (error) {
+    console.error("getEstadoSeguridad error:", error);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error obteniendo estado de seguridad",
+      detail: error.message,
+    });
+  }
+}

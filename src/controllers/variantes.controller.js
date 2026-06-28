@@ -7,6 +7,10 @@ import {
   updateVariante,
   setVarianteStatus,
 } from "../models/variantes.model.js";
+import {
+  getParametroBool,
+  getParametroNumber,
+} from "../services/configuracion.service.js";
 
 function toNumberOrNull(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -174,6 +178,21 @@ export async function postVariantesProducto(req, res) {
       const stock_apartado = toIntOrNull(it?.stock_apartado);
       const stock_minimo = toIntOrNull(it?.stock_minimo);
 
+      const aplicarStockMinimoGeneral = await getParametroBool(
+        req.db,
+        "inventario.aplicar_stock_minimo_en_nuevos_productos",
+        true,
+      );
+
+      const stockMinimoGeneral = await getParametroNumber(
+        req.db,
+        "inventario.stock_minimo_general",
+        5,
+      );
+
+      const stockMinimoFinal =
+        stock_minimo ?? (aplicarStockMinimoGeneral ? stockMinimoGeneral : 5);
+
       if (!sku || sku.length < 2) {
         return res.status(400).json({
           ok: false,
@@ -233,7 +252,7 @@ export async function postVariantesProducto(req, res) {
         precio_costo,
         stock_fisico: stock_fisico ?? 0,
         stock_apartado: stock_apartado ?? 0,
-        stock_minimo: stock_minimo ?? 5,
+        stock_minimo: stockMinimoFinal,
         activo: it?.activo !== false,
       });
 

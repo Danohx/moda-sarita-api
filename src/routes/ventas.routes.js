@@ -12,6 +12,9 @@ import {
   postCerrarCorte,
   getCorteDetalle,
   getHistorial,
+  getVentaTicketPdf,
+  getHistorialVentasPOS,
+  getVentaHistorialPOSById
 } from "../controllers/ventas.controller.js";
 
 const router = Router();
@@ -19,6 +22,9 @@ const router = Router();
 router.use(useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"));
 
 router.post("/pos", postVentaPOS);
+
+router.get("/historial", getHistorialVentasPOS);
+router.get("/historial/:id", getVentaHistorialPOSById);
 
 router.post("/apartados", postApartado);
 router.post("/apartados/:id/abonos", postAbono);
@@ -32,5 +38,7 @@ router.get("/corte/historial", getHistorial);
 router.get("/corte/:id", getCorteDetalle);
 
 router.post("/corte/:id/cerrar", postCerrarCorte);
+
+router.get("/pos/:id/ticket", getVentaTicketPdf);
 
 export default router;

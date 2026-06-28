@@ -4,6 +4,11 @@ function toMoney(n) {
   return Math.round(x * 100) / 100;
 }
 
+function toInt(value, fallback) {
+  const n = Number(value);
+  return Number.isInteger(n) ? n : fallback;
+}
+
 async function getVarianteForUpdate(client, varianteId) {
   const { rows } = await client.query(
     `
@@ -27,6 +32,27 @@ async function getVarianteForUpdate(client, varianteId) {
   return rows[0] || null;
 }
 
+async function getMetodoPagoPOS(client, metodo) {
+  const { rows } = await client.query(
+    `
+      SELECT
+        codigo,
+        nombre,
+        activo_pos,
+        requiere_referencia,
+        permite_cambio,
+        requiere_confirmacion_manual,
+        es_credito
+      FROM configuracion.metodos_pago
+      WHERE codigo = $1
+      LIMIT 1;
+    `,
+    [metodo],
+  );
+
+  return rows[0] || null;
+}
+
 export async function crearVentaPOS(
   db,
   {
@@ -39,6 +65,7 @@ export async function crearVentaPOS(
     metodo_pago,
     referencia_externa = null,
     tipo = "VENTA_POS",
+    posConfig = {},
   },
 ) {
   if (!Array.isArray(items) || items.length === 0) {
@@ -53,10 +80,81 @@ export async function crearVentaPOS(
     throw e;
   }
 
+  const config = {
+    permitirVentaSinCliente: true,
+    permitirDescuentosManuales: true,
+    descuentoManualMaximoPercent: 20,
+    requerirCorteAbierto: true,
+    metodoPagoDefault: "EFECTIVO",
+    ...posConfig,
+  };
+
+  const metodoPagoFinal = metodo_pago || config.metodoPagoDefault;
+
+  if (!config.permitirVentaSinCliente && !cliente_id) {
+    const e = new Error(
+      "La configuración actual requiere seleccionar un cliente para vender.",
+    );
+    e.code = "VALIDATION";
+    throw e;
+  }
+
+  if (!config.permitirDescuentosManuales && Number(descuento || 0) > 0) {
+    const e = new Error("Los descuentos manuales están desactivados en POS.");
+    e.code = "VALIDATION";
+    throw e;
+  }
+
   const client = await db.connect();
 
   try {
     await client.query("BEGIN");
+
+    let corte_id = null;
+
+    if (config.requerirCorteAbierto) {
+      const corteRes = await client.query(
+        `SELECT id FROM ventas.corte_caja WHERE usuario_id = $1 AND fin_turno IS NULL LIMIT 1`,
+        [vendedor_id],
+      );
+
+      if (corteRes.rows.length === 0) {
+        const e = new Error("Debes abrir turno/corte antes de vender.");
+        e.code = "VALIDATION";
+        throw e;
+      }
+
+      corte_id = corteRes.rows[0].id;
+    }
+
+    const metodoPagoConfig = await getMetodoPagoPOS(client, metodoPagoFinal);
+
+    if (!metodoPagoConfig || metodoPagoConfig.activo_pos !== true) {
+      const e = new Error(
+        "El método de pago seleccionado no está activo para POS.",
+      );
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    const esPagoCredito = metodoPagoConfig.es_credito === true;
+
+    if (esPagoCredito && !cliente_id) {
+      const e = new Error(
+        "Para pagar con crédito de tienda debes seleccionar un cliente.",
+      );
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    if (
+      metodoPagoConfig.requiere_referencia === true &&
+      !String(referencia_externa || "").trim()
+    ) {
+      const e = new Error("Este método de pago requiere referencia.");
+      e.code = "VALIDATION";
+      throw e;
+    }
 
     const normalizedItems = [];
 
@@ -117,14 +215,88 @@ export async function crearVentaPOS(
       subtotal += toMoney(it.precio_unitario * it.cantidad);
     }
 
-    descuento = toMoney(descuento);
-    costo_envio = toMoney(costo_envio);
-    const total = toMoney(subtotal - descuento + costo_envio);
+    const descNum = Number(descuento || 0);
+    const envioNum = Number(costo_envio || 0);
+
+    if (descNum < 0) {
+      const e = new Error("El descuento no puede ser negativo.");
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    if (descNum > subtotal) {
+      const e = new Error("El descuento no puede exceder el subtotal.");
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    const descuentoMaximo =
+      subtotal * (Number(config.descuentoManualMaximoPercent || 0) / 100);
+
+    if (descNum > descuentoMaximo) {
+      const e = new Error(
+        `El descuento excede el máximo permitido (${config.descuentoManualMaximoPercent}%).`,
+      );
+      e.code = "VALIDATION";
+      throw e;
+    }
+
+    const total = toMoney(subtotal - descNum + envioNum);
 
     if (total < 0) {
       const e = new Error("El total no puede ser negativo");
       e.code = "VALIDATION";
       throw e;
+    }
+
+    let clienteCredito = null;
+
+    if (esPagoCredito) {
+      const clienteCreditoRes = await client.query(
+        `
+    SELECT
+      id,
+      nombres,
+      apellido_paterno,
+      apellido_materno,
+      tiene_credito,
+      limite_credito,
+      saldo_deudor,
+      activo
+    FROM clientes.clientes
+    WHERE id = $1
+    FOR UPDATE
+    `,
+        [cliente_id],
+      );
+
+      clienteCredito = clienteCreditoRes.rows[0];
+
+      if (!clienteCredito || clienteCredito.activo !== true) {
+        const e = new Error(
+          "El cliente seleccionado no existe o está inactivo.",
+        );
+        e.code = "VALIDATION";
+        throw e;
+      }
+
+      if (clienteCredito.tiene_credito !== true) {
+        const e = new Error("El cliente seleccionado no tiene crédito activo.");
+        e.code = "VALIDATION";
+        throw e;
+      }
+
+      const limiteCredito = Number(clienteCredito.limite_credito || 0);
+      const saldoDeudor = Number(clienteCredito.saldo_deudor || 0);
+      const disponibleCredito = limiteCredito - saldoDeudor;
+
+      if (total > disponibleCredito) {
+        const e = new Error(
+          `Crédito insuficiente. Disponible: $${disponibleCredito.toFixed(2)}.`,
+        );
+        e.code = "VALIDATION";
+        throw e;
+      }
     }
 
     const pRes = await client.query(
@@ -194,11 +366,60 @@ export async function crearVentaPOS(
 
     await client.query(
       `
-      INSERT INTO ventas.pagos (pedido_id, monto, metodo, referencia_externa)
-      VALUES ($1,$2,$3,$4)
+      INSERT INTO ventas.pagos
+        (pedido_id, monto, metodo, referencia_externa, usuario_id)
+      VALUES
+        ($1,$2,$3,$4,$5)
       `,
-      [pedido.id, total, metodo_pago, referencia_externa],
+      [pedido.id, total, metodoPagoFinal, referencia_externa, vendedor_id],
     );
+
+    if (esPagoCredito && clienteCredito) {
+      const saldoAnterior = Number(clienteCredito.saldo_deudor || 0);
+      const saldoResultante = toMoney(saldoAnterior + total);
+
+      await client.query(
+        `
+        UPDATE clientes.clientes
+        SET
+          saldo_deudor = $2,
+          fecha_actualizacion_credito = now()
+        WHERE id = $1
+        `,
+        [cliente_id, saldoResultante],
+      );
+
+      await client.query(
+        `
+    INSERT INTO clientes.movimientos_credito
+      (
+        cliente_id,
+        usuario_id,
+        pedido_id,
+        tipo,
+        descripcion,
+        monto,
+        saldo_anterior,
+        saldo_resultante,
+        metodo_pago,
+        referencia_externa
+      )
+    VALUES
+      ($1,$2,$3,'COMPRA',$4,$5,$6,$7,$8,$9)
+    `,
+        [
+          cliente_id,
+          vendedor_id,
+          pedido.id,
+          `Compra POS folio ${pedido.folio}`,
+          total,
+          saldoAnterior,
+          saldoResultante,
+          metodoPagoFinal,
+          referencia_externa,
+        ],
+      );
+    }
 
     const p2 = await client.query(
       `UPDATE ventas.pedidos SET estado = 'PAGADO' WHERE id = $1 RETURNING *`,
@@ -714,6 +935,85 @@ export async function cancelarApartado(
   }
 }
 
+async function getDesgloseMetodosCorte(
+  client,
+  { usuario_id, inicio_turno, fin_turno = null },
+) {
+  const { rows } = await client.query(
+    `
+    WITH pagos_turno AS (
+      SELECT
+        pg.metodo::text AS codigo,
+        COALESCE(SUM(pg.monto), 0)::numeric(10,2) AS total,
+        COUNT(*)::int AS operaciones
+      FROM ventas.pagos pg
+      JOIN ventas.pedidos pe ON pe.id = pg.pedido_id
+      WHERE pg.estado = 'CONFIRMADO'
+        AND COALESCE(pg.usuario_id, pe.vendedor_id) = $1
+        AND pg.fecha_pago >= $2
+        AND ($3::timestamptz IS NULL OR pg.fecha_pago <= $3)
+      GROUP BY pg.metodo::text
+    ),
+    metodos AS (
+      SELECT
+        mp.codigo::text AS codigo,
+        mp.nombre,
+        mp.orden,
+        mp.activo_pos,
+        mp.permite_cambio,
+        mp.es_credito
+      FROM configuracion.metodos_pago mp
+      WHERE mp.activo_pos = true
+    )
+    SELECT
+      COALESCE(m.codigo, p.codigo) AS codigo,
+      COALESCE(m.nombre, INITCAP(REPLACE(p.codigo, '_', ' '))) AS nombre,
+      COALESCE(p.total, 0)::numeric(10,2) AS total,
+      COALESCE(p.operaciones, 0)::int AS operaciones,
+      CASE
+        WHEN COALESCE(m.codigo, p.codigo) = 'EFECTIVO'
+          OR COALESCE(m.permite_cambio, false) = true
+        THEN true
+        ELSE false
+      END AS afecta_caja,
+      COALESCE(m.permite_cambio, false) AS permite_cambio,
+      COALESCE(m.es_credito, false) AS es_credito,
+      COALESCE(m.activo_pos, false) AS activo_pos
+    FROM metodos m
+    FULL OUTER JOIN pagos_turno p ON p.codigo = m.codigo
+    WHERE COALESCE(m.activo_pos, false) = true
+       OR COALESCE(p.total, 0) > 0
+    ORDER BY
+      COALESCE(m.orden, 999),
+      COALESCE(m.nombre, p.codigo);
+    `,
+    [usuario_id, inicio_turno, fin_turno],
+  );
+
+  const metodos = rows.map((row) => ({
+    codigo: row.codigo,
+    nombre: row.nombre,
+    total: Number(row.total || 0),
+    operaciones: Number(row.operaciones || 0),
+    afecta_caja: row.afecta_caja === true,
+    permite_cambio: row.permite_cambio === true,
+    es_credito: row.es_credito === true,
+    activo_pos: row.activo_pos === true,
+  }));
+
+  const totalCaja = metodos
+    .filter((m) => m.afecta_caja)
+    .reduce((acc, m) => acc + m.total, 0);
+
+  const totalPagos = metodos.reduce((acc, m) => acc + m.total, 0);
+
+  return {
+    metodos,
+    total_caja: Number(totalCaja.toFixed(2)),
+    total_pagos: Number(totalPagos.toFixed(2)),
+  };
+}
+
 export async function abrirCorte(db, { usuario_id, fondo_inicial = 0 }) {
   const fondoInicialNum = toMoney(fondo_inicial);
 
@@ -762,38 +1062,40 @@ export async function getCorteAbierto(db, { usuario_id }) {
 
     const corte = rows[0];
 
-    const { rows: pagosRows } = await client.query(
-      `
-      SELECT
-        COALESCE(SUM(monto) FILTER (WHERE metodo = 'EFECTIVO'), 0) AS total_efectivo,
-        COALESCE(SUM(monto) FILTER (WHERE metodo IN ('TARJETA_CREDITO', 'TARJETA_DEBITO')), 0) AS total_tarjeta,
-        COALESCE(SUM(monto) FILTER (WHERE metodo = 'TRANSFERENCIA'), 0) AS total_transferencia,
-        COALESCE(SUM(monto), 0) AS total_pagos
-      FROM ventas.v_pagos_corte_detalle
-      WHERE vendedor_id = $1
-        AND fecha_pago >= $2
-        AND fecha_pago <= now()
-        AND pedido_estado = 'PAGADO'
-      `,
-      [usuario_id, corte.inicio_turno],
-    );
+    const desglose = await getDesgloseMetodosCorte(client, {
+      usuario_id,
+      inicio_turno: corte.inicio_turno,
+      fin_turno: null,
+    });
 
-    const totalEfectivo = toMoney(pagosRows[0].total_efectivo);
-    const totalTarjeta = toMoney(pagosRows[0].total_tarjeta);
-    const totalTransferencia = toMoney(pagosRows[0].total_transferencia);
-    const totalPagos = toMoney(pagosRows[0].total_pagos);
     const fondoInicial = toMoney(corte.fondo_inicial ?? 0);
-    const efectivoEsperado = toMoney(fondoInicial + totalEfectivo);
+    const efectivoEsperado = toMoney(fondoInicial + desglose.total_caja);
+
+    const totalTarjeta = desglose.metodos
+      .filter((m) => String(m.codigo).includes("TARJETA"))
+      .reduce((acc, m) => acc + m.total, 0);
+
+    const totalTransferencia =
+      desglose.metodos.find((m) => m.codigo === "TRANSFERENCIA")?.total ?? 0;
 
     return {
       ...corte,
       usuario_nombre: corte.usuario_nombre,
+
+      desglose_metodos: desglose.metodos,
+
+      totales_metodos: {
+        total_caja: desglose.total_caja,
+        total_pagos: desglose.total_pagos,
+        efectivo_esperado: efectivoEsperado,
+      },
+
       resumen: {
         fondo_inicial: fondoInicial,
-        total_efectivo: totalEfectivo,
-        total_tarjeta: totalTarjeta,
-        total_transferencia: totalTransferencia,
-        total_pagos: totalPagos,
+        total_efectivo: desglose.total_caja,
+        total_tarjeta: toMoney(totalTarjeta),
+        total_transferencia: toMoney(totalTransferencia),
+        total_pagos: desglose.total_pagos,
         efectivo_esperado: efectivoEsperado,
       },
     };
@@ -844,29 +1146,21 @@ export async function cerrarCorte(
       throw e;
     }
 
-    const { rows: pagosRows } = await client.query(
-      `
-      SELECT
-        COALESCE(SUM(CASE WHEN pa.metodo = 'EFECTIVO' THEN pa.monto ELSE 0 END), 0) AS total_efectivo,
-        COALESCE(SUM(CASE WHEN pa.metodo IN ('TARJETA_CREDITO', 'TARJETA_DEBITO') THEN pa.monto ELSE 0 END), 0) AS total_tarjeta,
-        COALESCE(SUM(CASE WHEN pa.metodo = 'TRANSFERENCIA' THEN pa.monto ELSE 0 END), 0) AS total_transferencia,
-        COALESCE(SUM(pa.monto), 0) AS total_pagos
-      FROM ventas.pagos pa
-      INNER JOIN ventas.pedidos pe ON pe.id = pa.pedido_id
-      WHERE pe.vendedor_id = $1
-        AND pa.fecha_pago >= $2
-        AND pa.fecha_pago <= now()
-        AND pe.estado = 'PAGADO'
-      `,
-      [usuario_id, corte.inicio_turno],
-    );
+    const desglose = await getDesgloseMetodosCorte(client, {
+      usuario_id,
+      inicio_turno: corte.inicio_turno,
+      fin_turno: null,
+    });
 
-    const totalEfectivo = toMoney(pagosRows[0].total_efectivo);
-    const totalTarjeta = toMoney(pagosRows[0].total_tarjeta);
-    const totalTransferencia = toMoney(pagosRows[0].total_transferencia);
-    const totalPagos = toMoney(pagosRows[0].total_pagos);
     const fondoInicial = toMoney(corte.fondo_inicial ?? 0);
-    const total_sistema = toMoney(fondoInicial + totalEfectivo);
+    const total_sistema = toMoney(fondoInicial + desglose.total_caja);
+
+    const totalTarjeta = desglose.metodos
+      .filter((m) => String(m.codigo).includes("TARJETA"))
+      .reduce((acc, m) => acc + m.total, 0);
+
+    const totalTransferencia =
+      desglose.metodos.find((m) => m.codigo === "TRANSFERENCIA")?.total ?? 0;
 
     const out = await client.query(
       `
@@ -902,12 +1196,18 @@ export async function cerrarCorte(
     return {
       ...corteCerrado,
       usuario_nombre,
+      desglose_metodos: desglose.metodos,
+      totales_metodos: {
+        total_caja: desglose.total_caja,
+        total_pagos: desglose.total_pagos,
+        efectivo_esperado: total_sistema,
+      },
       resumen: {
         fondo_inicial: fondoInicial,
-        total_efectivo: totalEfectivo,
-        total_tarjeta: totalTarjeta,
-        total_transferencia: totalTransferencia,
-        total_pagos: totalPagos,
+        total_efectivo: desglose.total_caja,
+        total_tarjeta: toMoney(totalTarjeta),
+        total_transferencia: toMoney(totalTransferencia),
+        total_pagos: desglose.total_pagos,
         efectivo_esperado: total_sistema,
       },
     };
@@ -965,5 +1265,306 @@ export async function getCorteById(db, corte_id) {
     throw e;
   }
 
-  return rows[0];
+  const corte = rows[0];
+
+  const desglose = await getDesgloseMetodosCorte(db, {
+    usuario_id: corte.usuario_id,
+    inicio_turno: corte.inicio_turno,
+    fin_turno: corte.fin_turno,
+  });
+
+  const fondoInicial = toMoney(corte.fondo_inicial ?? 0);
+  const efectivoEsperado = toMoney(fondoInicial + desglose.total_caja);
+
+  const totalTarjeta = desglose.metodos
+    .filter((m) => String(m.codigo).includes("TARJETA"))
+    .reduce((acc, m) => acc + m.total, 0);
+
+  const totalTransferencia =
+    desglose.metodos.find((m) => m.codigo === "TRANSFERENCIA")?.total ?? 0;
+
+  return {
+    ...corte,
+    desglose_metodos: desglose.metodos,
+    totales_metodos: {
+      total_caja: desglose.total_caja,
+      total_pagos: desglose.total_pagos,
+      efectivo_esperado: efectivoEsperado,
+    },
+    resumen: {
+      fondo_inicial: fondoInicial,
+      total_efectivo: desglose.total_caja,
+      total_tarjeta: toMoney(totalTarjeta),
+      total_transferencia: toMoney(totalTransferencia),
+      total_pagos: desglose.total_pagos,
+      efectivo_esperado: efectivoEsperado,
+    },
+  };
+}
+
+export async function listarHistorialVentas(
+  db,
+  {
+    q = null,
+    estado = null,
+    fecha_inicio = null,
+    fecha_fin = null,
+    metodo = null,
+    vendedor_id = null,
+    cliente_id = null,
+    limit = 50,
+    offset = 0,
+  } = {},
+) {
+  const safeLimit = Math.min(Math.max(toInt(limit, 50), 1), 200);
+  const safeOffset = Math.max(toInt(offset, 0), 0);
+
+  const params = [];
+  const where = [`p.tipo = 'PUNTO_VENTA'`];
+
+  if (q) {
+    params.push(`%${String(q).trim()}%`);
+    where.push(`
+      (
+        p.folio::text ILIKE $${params.length}
+        OR CONCAT_WS(' ', c.nombres, c.apellido_paterno, c.apellido_materno) ILIKE $${params.length}
+        OR c.telefono ILIKE $${params.length}
+        OR c.email ILIKE $${params.length}
+        OR CONCAT_WS(' ', u.nombres, u.apellido_paterno, u.apellido_materno) ILIKE $${params.length}
+        OR u.email ILIKE $${params.length}
+      )
+    `);
+  }
+
+  if (estado) {
+    params.push(String(estado).trim().toUpperCase());
+    where.push(`p.estado = $${params.length}`);
+  }
+
+  if (fecha_inicio) {
+    params.push(fecha_inicio);
+    where.push(`p.fecha_creacion >= $${params.length}::timestamptz`);
+  }
+
+  if (fecha_fin) {
+    params.push(fecha_fin);
+    where.push(`p.fecha_creacion < ($${params.length}::date + INTERVAL '1 day')`);
+  }
+
+  if (vendedor_id) {
+    params.push(vendedor_id);
+    where.push(`p.vendedor_id = $${params.length}`);
+  }
+
+  if (cliente_id) {
+    params.push(cliente_id);
+    where.push(`p.cliente_id = $${params.length}`);
+  }
+
+  if (metodo) {
+    params.push(String(metodo).trim().toUpperCase());
+    where.push(`
+      EXISTS (
+        SELECT 1
+        FROM ventas.pagos px
+        WHERE px.pedido_id = p.id
+          AND px.metodo = $${params.length}
+      )
+    `);
+  }
+
+  const whereSql = where.join("\n AND ");
+
+  const countSql = `
+    SELECT COUNT(DISTINCT p.id)::integer AS total
+    FROM ventas.pedidos p
+    LEFT JOIN clientes.clientes c ON c.id = p.cliente_id
+    LEFT JOIN seguridad.usuarios u ON u.id = p.vendedor_id
+    WHERE ${whereSql}
+  `;
+
+  const { rows: countRows } = await db.query(countSql, params);
+  const total = countRows[0]?.total ?? 0;
+
+  params.push(safeLimit);
+  const limitParam = params.length;
+
+  params.push(safeOffset);
+  const offsetParam = params.length;
+
+  const sql = `
+    SELECT
+      p.id,
+      p.folio,
+      p.estado,
+      p.subtotal,
+      p.descuento,
+      p.costo_envio,
+      p.total,
+      p.fecha_creacion,
+      p.fecha_cancelacion,
+      p.motivo_cancelacion,
+      p.observaciones,
+
+      p.cliente_id,
+      COALESCE(
+        NULLIF(TRIM(CONCAT_WS(' ', c.nombres, c.apellido_paterno, c.apellido_materno)), ''),
+        'Público general'
+      ) AS cliente_nombre,
+
+      p.vendedor_id,
+      COALESCE(
+        NULLIF(TRIM(CONCAT_WS(' ', u.nombres, u.apellido_paterno, u.apellido_materno)), ''),
+        u.email,
+        'N/A'
+      ) AS vendedor_nombre,
+
+      COUNT(DISTINCT d.id)::integer AS total_productos,
+
+      COALESCE(
+        SUM(
+          CASE
+            WHEN pg.estado = 'CONFIRMADO' THEN pg.monto
+            ELSE 0
+          END
+        ),
+        0
+      ) AS total_pagado,
+
+      COALESCE(
+        STRING_AGG(DISTINCT pg.metodo::text, ', '),
+        'N/A'
+      ) AS metodos_pago
+
+    FROM ventas.pedidos p
+    LEFT JOIN clientes.clientes c ON c.id = p.cliente_id
+    LEFT JOIN seguridad.usuarios u ON u.id = p.vendedor_id
+    LEFT JOIN ventas.detalles_pedido d ON d.pedido_id = p.id
+    LEFT JOIN ventas.pagos pg ON pg.pedido_id = p.id
+
+    WHERE ${whereSql}
+
+    GROUP BY
+      p.id,
+      c.id,
+      u.id
+
+    ORDER BY p.fecha_creacion DESC
+    LIMIT $${limitParam}
+    OFFSET $${offsetParam}
+  `;
+
+  const { rows } = await db.query(sql, params);
+
+  return {
+    rows,
+    total,
+    limit: safeLimit,
+    offset: safeOffset,
+  };
+}
+
+export async function getVentaHistorialDetalle(db, ventaId) {
+  const ventaSql = `
+    SELECT
+      p.id,
+      p.folio,
+      p.estado,
+      p.subtotal,
+      p.descuento,
+      p.costo_envio,
+      p.total,
+      p.fecha_creacion,
+      p.fecha_cancelacion,
+      p.motivo_cancelacion,
+      p.observaciones,
+
+      p.cliente_id,
+      COALESCE(
+        NULLIF(TRIM(CONCAT_WS(' ', c.nombres, c.apellido_paterno, c.apellido_materno)), ''),
+        'Público general'
+      ) AS cliente_nombre,
+      c.telefono AS cliente_telefono,
+      c.email AS cliente_email,
+
+      p.vendedor_id,
+      COALESCE(
+        NULLIF(TRIM(CONCAT_WS(' ', u.nombres, u.apellido_paterno, u.apellido_materno)), ''),
+        u.email,
+        'N/A'
+      ) AS vendedor_nombre,
+      u.email AS vendedor_email
+
+    FROM ventas.pedidos p
+    LEFT JOIN clientes.clientes c ON c.id = p.cliente_id
+    LEFT JOIN seguridad.usuarios u ON u.id = p.vendedor_id
+    WHERE p.id = $1
+      AND p.tipo = 'PUNTO_VENTA'
+    LIMIT 1
+  `;
+
+  const { rows: ventaRows } = await db.query(ventaSql, [ventaId]);
+  const venta = ventaRows[0] || null;
+
+  if (!venta) return null;
+
+  const detallesSql = `
+    SELECT
+      d.id,
+      d.variante_id,
+      d.cantidad,
+      d.precio_unitario,
+      d.importe,
+
+      vp.sku,
+      vp.codigo_barras,
+
+      p.id AS producto_id,
+      p.nombre AS producto_nombre,
+
+      t.nombre AS talla_nombre,
+      c.nombre AS color_nombre,
+      c.hex AS color_hex
+
+    FROM ventas.detalles_pedido d
+    JOIN inventario.variantes_producto vp ON vp.id = d.variante_id
+    JOIN inventario.productos p ON p.id = vp.producto_id
+    LEFT JOIN inventario.tallas t ON t.id = vp.talla_id
+    LEFT JOIN inventario.colores c ON c.id = vp.color_id
+    WHERE d.pedido_id = $1
+    ORDER BY p.nombre ASC
+  `;
+
+  const pagosSql = `
+    SELECT
+      pg.id,
+      pg.monto,
+      pg.metodo,
+      pg.referencia_externa,
+      pg.fecha_pago,
+      pg.concepto,
+      pg.estado,
+
+      COALESCE(
+        NULLIF(TRIM(CONCAT_WS(' ', u.nombres, u.apellido_paterno, u.apellido_materno)), ''),
+        u.email,
+        'N/A'
+      ) AS usuario_nombre
+
+    FROM ventas.pagos pg
+    LEFT JOIN seguridad.usuarios u ON u.id = pg.usuario_id
+    WHERE pg.pedido_id = $1
+    ORDER BY pg.fecha_pago ASC
+  `;
+
+  const [{ rows: detalles }, { rows: pagos }] = await Promise.all([
+    db.query(detallesSql, [ventaId]),
+    db.query(pagosSql, [ventaId]),
+  ]);
+
+  return {
+    venta,
+    detalles,
+    pagos,
+  };
 }

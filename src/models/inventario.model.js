@@ -315,3 +315,77 @@ export async function createMovimientoAndApply(
     client.release();
   }
 }
+
+// Alertas
+export async function getAlertasInventario(db, { limit = 20 } = {}) {
+  const safeLimit = Number.isInteger(Number(limit))
+    ? Math.min(Math.max(Number(limit), 1), 100)
+    : 20;
+
+  const [bajoStock, sinImagen, sinCategoria] = await Promise.all([
+    db.query(
+      `
+        SELECT
+          variante_id,
+          producto_id,
+          producto_nombre,
+          categoria_nombre,
+          talla_nombre,
+          color_nombre,
+          sku,
+          codigo_barras,
+          stock_fisico,
+          stock_apartado,
+          stock_disponible,
+          stock_minimo,
+          updated_at
+        FROM configuracion.v_alertas_bajo_stock
+        ORDER BY stock_disponible ASC, producto_nombre ASC
+        LIMIT $1;
+      `,
+      [safeLimit],
+    ),
+
+    db.query(
+      `
+        SELECT
+          producto_id,
+          nombre,
+          categoria_id,
+          categoria_nombre,
+          activo,
+          fecha_creacion
+        FROM configuracion.v_productos_sin_imagen
+        ORDER BY fecha_creacion DESC
+        LIMIT $1;
+      `,
+      [safeLimit],
+    ),
+
+    db.query(
+      `
+        SELECT
+          *
+        FROM configuracion.v_productos_sin_categoria
+        ORDER BY fecha_creacion DESC
+        LIMIT $1;
+      `,
+      [safeLimit],
+    ),
+  ]);
+
+  return {
+    bajo_stock: bajoStock.rows,
+    productos_sin_imagen: sinImagen.rows,
+    productos_sin_categoria: sinCategoria.rows,
+    resumen: {
+      bajo_stock: bajoStock.rows.length,
+      productos_sin_imagen: sinImagen.rows.length,
+      productos_sin_categoria: sinCategoria.rows.length,
+      total:
+        bajoStock.rows.length +
+        sinImagen.rows.length +
+        sinCategoria.rows.length,
+    },
+  };
+}

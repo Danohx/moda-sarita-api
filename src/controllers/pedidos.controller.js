@@ -11,6 +11,7 @@ import {
   generarTicketPedidoPdfStream,
   generarTicketPagoPdfStream,
 } from "../utils/pdf/ticketPedido.pdf.js";
+import { getConfigTicket } from "../services/configuracion.service.js"
 
 const METODOS_PAGO_VALIDOS = new Set([
   "EFECTIVO",
@@ -436,10 +437,13 @@ export async function getPedidoTicketPdf(req, res) {
       `inline; filename="ticket-${folioLabel}.pdf"`,
     );
 
+    const ticketConfig = await getConfigTicket(req.db);
+
     const pdf = generarTicketPedidoPdfStream({
       pedido,
       detalles,
       pagos,
+      ticketConfig,
     });
 
     pdf.pipe(res);
@@ -502,7 +506,13 @@ export async function getPagoTicketPdf(req, res) {
       `inline; filename="ticket-pago-${folioLabel}-${pago.id}.pdf"`,
     );
 
-    const pdf = generarTicketPagoPdfStream(data);
+    const ticketConfig = await getConfigTicket(req.db);
+
+    const pdf = generarTicketPagoPdfStream({
+      ...data,
+      ticketConfig,
+    });
+
     pdf.pipe(res);
   } catch (err) {
     if (err.code === "22P02") {

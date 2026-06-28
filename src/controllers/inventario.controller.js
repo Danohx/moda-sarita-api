@@ -4,6 +4,7 @@ import {
   listMovimientosByVariante,
   listMovimientosByProducto,
   createMovimientoAndApply,
+  getAlertasInventario,
 } from "../models/inventario.model.js";
 
 function toInt(v, def) {
@@ -250,6 +251,27 @@ export async function postMovimientoInventario(req, res) {
     return res.status(500).json({
       ok: false,
       msg: "Error aplicando movimiento",
+      detail: err.message,
+    });
+  }
+}
+
+export async function getAlertasInventarioController(req, res) {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 20;
+
+    const data = await getAlertasInventario(req.db, { limit });
+
+    return res.json({
+      ok: true,
+      data,
+    });
+  } catch (err) {
+    console.error("getAlertasInventarioController error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      msg: "Error obteniendo alertas de inventario",
       detail: err.message,
     });
   }
