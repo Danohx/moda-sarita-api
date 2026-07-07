@@ -23,6 +23,9 @@ import auditLogsRoutes from "./routes/auditLogs.routes.js";
 import pedidosRoutes from "./routes/pedidos.routes.js";
 import configuracionRoutes from "./routes/configuracion.routes.js";
 import reportesRoutes from "./routes/reportes.routes.js";
+import contenidoRoutes from "./routes/contenido.routes.js";
+import contactoRoutes from "./routes/contacto.routes.js";
+import marketingRoutes from "./routes/marketing.routes.js";
 
 const app = express();
 
@@ -76,5 +79,8 @@ app.use("/api/audit-logs", auditLogsRoutes);
 app.use("/api/pedidos", pedidosRoutes);
 app.use("/api/configuracion", configuracionRoutes);
 app.use("/api/reportes", reportesRoutes);
+app.use("/api/contenido", contenidoRoutes);
+app.use("/api/contacto", contactoRoutes);
+app.use("/api/marketing", marketingRoutes);
 
 export default app;

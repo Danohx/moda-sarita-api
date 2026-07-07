@@ -522,7 +522,7 @@ export async function postEmpleado(req, res) {
       email,
       rol_id: Number(rol_id),
       password_temporal,
-      actorId: req.user?.id ?? null,
+      usuarioId: req.user?.id ?? null,
     });
 
     return res.status(201).json({
@@ -576,7 +576,7 @@ export async function patchEmpleado(req, res) {
     }
 
     const data = await actualizarEmpleado(req.db, usuarioId, payload, {
-      actorId: req.user?.id ?? null,
+      usuarioId: req.user?.id ?? null,
     });
 
     return res.json({
