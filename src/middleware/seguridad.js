@@ -7,6 +7,12 @@ export function hashToken(token) {
 }
 
 export function generateAccessToken(payload) {
+  const expiresIn =
+    Number.isInteger(payload.expiresInSeconds) &&
+    payload.expiresInSeconds >= 300
+      ? payload.expiresInSeconds
+      : "15m";
+
   return jwt.sign(
     {
       sub: payload.userId,
@@ -15,7 +21,7 @@ export function generateAccessToken(payload) {
       tfa: !!payload.tfa,
     },
     process.env.JWT_SECRET,
-    { expiresIn: "15m" },
+    { expiresIn },
   );
 }
 

@@ -12,6 +12,11 @@ const required = [
   "CLOUDINARY_API_SECRET",
   "CLOUDINARY_FOLDER",
   "CRON_SECRET",
+  // OAuth Alexa
+  "ALEXA_OAUTH_CLIENT_ID",
+  "ALEXA_OAUTH_CLIENT_SECRET",
+  "ALEXA_OAUTH_SCOPE",
+  "ALEXA_OAUTH_REDIRECT_URIS",
 ];
 
 for (const k of required) {
