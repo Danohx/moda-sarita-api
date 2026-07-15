@@ -13,6 +13,7 @@ import {
   logout,
   revokeAllSessions,
   verifySession,
+  getMe,
 } from "../controllers/auth.controller.js";
 import { useInternalDb } from "../middleware/dbContext.js";
 import { requireAuth, requirePermission } from "../middleware/seguridad.js";
@@ -67,6 +68,10 @@ router.post(
     .trim()
     .notEmpty()
     .matches(/^[a-zA-ZÁ-ÿ\u00f1\u00d1\s]+$/),
+  body("apellidoMaterno")
+    .optional({ nullable: true })
+    .trim()
+    .matches(/^[a-zA-ZÁ-ÿ\u00f1\u00d1\s]*$/),
   body("correo").trim().isEmail().normalizeEmail(),
   body("contrasena").isString().isLength({ min: 8 }),
   validar,
@@ -137,12 +142,8 @@ router.post(
 
 router.post("/revoke-all", requireAuth, revokeAllSessions);
 router.get("/verify", requireAuth, verifySession);
+router.get("/me", requireAuth, getMe);
 
-router.get("/me", requireAuth, (req, res) => {
-  res.json(req.user);
-});
-
-// Prueba
 router.get(
   "/rbac-test",
   requireAuth,

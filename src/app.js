@@ -13,6 +13,8 @@ import productosRoutes from "./routes/productos.routes.js";
 import inventarioRoutes from "./routes/inventario.routes.js";
 import proveedoresRoutes from "./routes/proveedores.routes.js";
 import clientesRoutes from "./routes/clientes.routes.js";
+import cuentaRoutes from "./routes/cuenta.routes.js";
+import checkoutRoutes from "./routes/checkout.routes.js";
 import cuponesRoutes from "./routes/cupones.routes.js";
 import ventasRoutes from "./routes/ventas.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
@@ -36,7 +38,7 @@ const whitelist = [
   "http://localhost:5174",
   "https://moda-sarita.com",
   "https://www.moda-sarita.com",
-  "https://moda-sarita-admin.pages.dev"
+  "https://moda-sarita-admin.pages.dev",
 ];
 
 app.use(express.json());
@@ -69,6 +71,8 @@ app.use("/api/productos", productosRoutes);
 app.use("/api/inventario", inventarioRoutes);
 app.use("/api/proveedores", proveedoresRoutes);
 app.use("/api/clientes", clientesRoutes);
+app.use("/api/cuenta", cuentaRoutes);
+app.use("/api/checkout", checkoutRoutes);
 app.use("/api/cupones", cuponesRoutes);
 app.use("/api/ventas", ventasRoutes);
 app.use("/api/dashboard", dashboardRoutes);

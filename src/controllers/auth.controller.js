@@ -34,46 +34,136 @@ export const register = async (req, res) => {
 
   if (!nombre || !apellidoPaterno || !correo || !contrasena) {
     return res.status(400).json({
-      mensaje: "Nombre, Apellido Paterno, Correo y Contraseña son requeridos.",
+      ok: false,
+      mensaje: "Nombre, apellido paterno, correo y contraseña son requeridos.",
     });
   }
 
   if (!passwordRegex.test(contrasena)) {
     return res.status(400).json({
+      ok: false,
       mensaje:
         "La contraseña debe tener al menos 8 caracteres, una mayúscula, una minúscula, un número y un carácter especial.",
     });
   }
 
-  try {
-    const email = correo.toLowerCase();
+  const client = await req.db.connect();
 
-    const { rows: exists } = await req.db.query(
-      "SELECT id FROM seguridad.usuarios WHERE email = $1",
+  try {
+    await client.query("BEGIN");
+
+    const email = String(correo).trim().toLowerCase();
+
+    const exists = await client.query(
+      `SELECT id FROM seguridad.usuarios WHERE LOWER(email) = $1 LIMIT 1`,
       [email],
     );
 
-    if (exists.length > 0)
-      return res.status(409).json({ mensaje: "El correo ya está registrado." });
+    if (exists.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        ok: false,
+        mensaje: "El correo ya está registrado.",
+      });
+    }
+
+    const roleResult = await client.query(
+      `
+        SELECT id, nombre
+        FROM seguridad.roles_sistema
+        WHERE UPPER(nombre) IN ('CLIENTE_WEB', 'CLIENTE')
+          AND activo = true
+        ORDER BY CASE WHEN UPPER(nombre) = 'CLIENTE_WEB' THEN 0 ELSE 1 END
+        LIMIT 1
+      `,
+    );
+
+    const clienteRole = roleResult.rows[0];
+    if (!clienteRole) {
+      throw new Error(
+        "No existe un rol CLIENTE_WEB activo. Ejecuta primero la migración de cuenta cliente.",
+      );
+    }
 
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(contrasena, salt);
 
-    const { rows } = await req.db.query(
-      `INSERT INTO seguridad.usuarios
-        (email, password_hash, nombres, apellido_paterno, apellido_materno, tfa_enabled)
-       VALUES ($1, $2, $3, $4, $5, false)
-       RETURNING id`,
-      [email, passwordHash, nombre, apellidoPaterno, apellidoMaterno || null],
+    const userResult = await client.query(
+      `
+        INSERT INTO seguridad.usuarios (
+          email,
+          password_hash,
+          nombres,
+          apellido_paterno,
+          apellido_materno,
+          rol_id,
+          activo,
+          tfa_enabled
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,true,false)
+        RETURNING id, email, nombres, apellido_paterno, apellido_materno, rol_id
+      `,
+      [
+        email,
+        passwordHash,
+        String(nombre).trim(),
+        String(apellidoPaterno).trim(),
+        apellidoMaterno ? String(apellidoMaterno).trim() : null,
+        clienteRole.id,
+      ],
     );
 
+    const user = userResult.rows[0];
+
+    const clienteResult = await client.query(
+      `
+        INSERT INTO clientes.clientes (
+          usuario_id,
+          nombres,
+          apellido_paterno,
+          apellido_materno,
+          email,
+          activo
+        )
+        VALUES ($1,$2,$3,$4,$5,true)
+        RETURNING id
+      `,
+      [
+        user.id,
+        user.nombres,
+        user.apellido_paterno,
+        user.apellido_materno,
+        user.email,
+      ],
+    );
+
+    await client.query("COMMIT");
+
     return res.status(201).json({
+      ok: true,
       mensaje: "Usuario registrado exitosamente.",
-      userId: rows[0].id,
+      userId: user.id,
+      clienteId: clienteResult.rows[0].id,
+      rol: clienteRole.nombre,
     });
-  } catch (e) {
-    console.error("Error en el registro:", e);
-    return res.status(500).json({ mensaje: "Error interno del servidor." });
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    if (error.code === "23505") {
+      return res.status(409).json({
+        ok: false,
+        mensaje: "El correo ya está registrado.",
+      });
+    }
+
+    console.error("Error en el registro:", error);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error interno del servidor.",
+      detail: error.message,
+    });
+  } finally {
+    client.release();
   }
 };
 
@@ -455,11 +545,9 @@ export const resetPassword = async (req, res) => {
     return res.status(400).json({ mensaje: "Faltan datos." });
 
   if (!passwordRegex.test(nuevaContrasena)) {
-    return res
-      .status(400)
-      .json({
-        mensaje: "La contraseña no cumple con los requisitos de seguridad.",
-      });
+    return res.status(400).json({
+      mensaje: "La contraseña no cumple con los requisitos de seguridad.",
+    });
   }
 
   try {
@@ -589,3 +677,58 @@ function signAccessToken(userId) {
     expiresIn: "15m",
   });
 }
+
+// ========================= ME =========================
+export const getMe = async (req, res) => {
+  try {
+    const { rows } = await req.db.query(
+      `
+        SELECT
+          u.id,
+          u.email,
+          u.nombres,
+          u.apellido_paterno,
+          u.apellido_materno,
+          u.activo,
+          u.tfa_enabled AS "tfaEnabled",
+          u.fecha_creacion AS "fechaCreacion",
+          r.id AS "rolId",
+          r.nombre AS rol,
+          c.id AS "clienteId",
+          c.telefono,
+          c.tiene_credito AS "tieneCredito",
+          c.limite_credito AS "limiteCredito",
+          c.saldo_deudor AS "saldoDeudor",
+          c.puede_apartar AS "puedeApartar"
+        FROM seguridad.usuarios u
+        LEFT JOIN seguridad.roles_sistema r ON r.id = u.rol_id
+        LEFT JOIN clientes.clientes c ON c.usuario_id = u.id
+        WHERE u.id = $1::uuid
+        LIMIT 1
+      `,
+      [req.user.id],
+    );
+
+    const user = rows[0];
+    if (!user) {
+      return res
+        .status(404)
+        .json({ ok: false, mensaje: "Usuario no encontrado." });
+    }
+
+    return res.json({
+      ...user,
+      nombre: [user.nombres, user.apellido_paterno, user.apellido_materno]
+        .filter(Boolean)
+        .join(" "),
+      permisos: req.user.permisos || [],
+    });
+  } catch (error) {
+    console.error("getMe error:", error);
+    return res.status(500).json({
+      ok: false,
+      mensaje: "Error obteniendo la sesión.",
+      detail: error.message,
+    });
+  }
+};
