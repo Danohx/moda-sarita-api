@@ -35,6 +35,8 @@ const app = express();
 app.set("trust proxy", 1);
 
 const whitelist = [
+  "http://localhost:3000",
+  "https://moda-sarita-api.vercel.app",
   "http://localhost:5173",
   "http://localhost:5174",
   "https://moda-sarita.com",
