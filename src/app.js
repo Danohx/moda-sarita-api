@@ -29,6 +29,7 @@ import contenidoRoutes from "./routes/contenido.routes.js";
 import contactoRoutes from "./routes/contacto.routes.js";
 import marketingRoutes from "./routes/marketing.routes.js";
 import alexaOAuthRoutes from "./routes/alexaOAuth.routes.js";
+import tiendaRoutes from "./routes/tienda.routes.js";
 
 const app = express();
 
@@ -90,5 +91,6 @@ app.use("/api/contenido", contenidoRoutes);
 app.use("/api/contacto", contactoRoutes);
 app.use("/api/marketing", marketingRoutes);
 app.use("/api/alexa/oauth", alexaOAuthRoutes);
+app.use("/api/tienda", tiendaRoutes);
 
 export default app;
