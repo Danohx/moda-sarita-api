@@ -9,6 +9,7 @@
     "dev": "nodemon index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "backup:bridge": "tsx src/scripts/backupsLocalBridge.ts"
+
   },
   "keywords": [],
   "author": "",

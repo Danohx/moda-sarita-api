@@ -17,7 +17,6 @@ import cuentaRoutes from "./routes/cuenta.routes.js";
 import checkoutRoutes from "./routes/checkout.routes.js";
 import cuponesRoutes from "./routes/cupones.routes.js";
 import ventasRoutes from "./routes/ventas.routes.js";
-import corteCajaRoutes from "./routes/corteCaja.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import monitoringRoutes from "./routes/monitoring.routes.js";
 // import backupsRoutes from "./routes/backups.routes.js";
@@ -82,7 +81,6 @@ app.use("/api/cuenta", cuentaRoutes);
 app.use("/api/checkout", checkoutRoutes);
 app.use("/api/cupones", cuponesRoutes);
 app.use("/api/ventas", ventasRoutes);
-app.use("/api/corte-caja", corteCajaRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/monitoring", monitoringRoutes);
 // app.use("/api/backups", backupsRoutes);
@@ -100,5 +98,4 @@ app.use("/api/creditos", creditoRoutes);
 app.use("/api/cron/creditos", creditoCronRoutes);
 
 export default app;
-
 

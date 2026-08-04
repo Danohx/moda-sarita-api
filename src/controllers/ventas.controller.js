@@ -42,48 +42,74 @@ export async function postVentaPOS(req, res) {
     const vendedor_id = req.user.id;
     const payload = req.body || {};
     const posConfig = await getConfigPOS(req.db);
+    const idempotencyKey =
+      req.get("Idempotency-Key") || payload.idempotency_key || null;
 
     const out = await crearVentaPOS(req.db, {
       ...payload,
       vendedor_id,
       posConfig,
+      idempotency_key: idempotencyKey,
     });
 
-    await registrarAuditoriaVenta(req.db, {
-      modulo: "ventas.pos",
-      accion: "create",
-      descripcion: `Se registró la venta ${getFolioVenta(out)} por ${formatMoney(
-        out.total,
-      )}.`,
-      usuarioId: req.user?.id ?? null,
-      metadata: {
-        venta_id: out.id,
-        folio: out.folio,
-        folio_label: getFolioVenta(out),
-        estado: out.estado,
-        cliente_id: out.cliente_id ?? null,
-        vendedor_id: out.vendedor_id ?? null,
-        total: Number(out.total ?? 0),
-        metodo_pago: req.body?.metodo_pago ?? null,
-        origen: "POS",
-      },
-    });
+    if (!out.idempotent_replay) {
+      await registrarAuditoriaVenta(req.db, {
+        modulo: "ventas.pos",
+        accion: "create",
+        descripcion: `Se registró la venta ${getFolioVenta(out)} por ${formatMoney(
+          out.total,
+        )}.`,
+        usuarioId: req.user?.id ?? null,
+        metadata: {
+          venta_id: out.id,
+          folio: out.folio,
+          folio_label: getFolioVenta(out),
+          estado: out.estado,
+          cliente_id: out.cliente_id ?? null,
+          vendedor_id: out.vendedor_id ?? null,
+          total: Number(out.total ?? 0),
+          metodo_pago: payload.metodo_pago ?? null,
+          credito_id: out.credito?.id ?? null,
+          monto_financiado: out.credito
+            ? Number(out.credito.monto_financiado ?? 0)
+            : null,
+          enganche: out.credito ? Number(out.credito.enganche ?? 0) : null,
+          idempotency_key: idempotencyKey,
+          origen: "POS",
+        },
+      });
+    }
 
-    return res.status(201).json({ ok: true, data: out });
+    return res.status(out.idempotent_replay ? 200 : 201).json({
+      ok: true,
+      replay: out.idempotent_replay === true,
+      data: out,
+    });
   } catch (err) {
     console.error("postVentaPOS error:", err);
-    if (err.code === "VALIDATION") {
-      return res.status(400).json({ ok: false, msg: err.message });
-    }
-    if (err.code === "NOT_FOUND") {
-      return res.status(404).json({ ok: false, msg: err.message });
-    }
-    if (err.code === "STOCK") {
-      return res.status(409).json({ ok: false, msg: err.message });
-    }
-    return res
-      .status(500)
-      .json({ ok: false, msg: "Error creando venta", detail: err.message });
+
+    const statusByCode = {
+      VALIDATION: 400,
+      NOT_FOUND: 404,
+      STOCK: 409,
+      CONFLICT: 409,
+      CREDIT_NOT_ELIGIBLE: 422,
+      P0001: 400,
+      "22P02": 400,
+      23505: 409,
+      23514: 400,
+      CONFIGURATION: 500,
+      CREDIT_RECONCILIATION: 500,
+    };
+
+    const status = statusByCode[err.code] || 500;
+
+    return res.status(status).json({
+      ok: false,
+      msg: err.message || "Error creando venta",
+      code: err.code || null,
+      details: err.details || err.detail || undefined,
+    });
   }
 }
 

@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import cors from "cors";
 
 // RUTAS
@@ -17,7 +17,6 @@ import cuentaRoutes from "./routes/cuenta.routes.js";
 import checkoutRoutes from "./routes/checkout.routes.js";
 import cuponesRoutes from "./routes/cupones.routes.js";
 import ventasRoutes from "./routes/ventas.routes.js";
-import corteCajaRoutes from "./routes/corteCaja.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import monitoringRoutes from "./routes/monitoring.routes.js";
 // import backupsRoutes from "./routes/backups.routes.js";
@@ -32,7 +31,6 @@ import marketingRoutes from "./routes/marketing.routes.js";
 import alexaOAuthRoutes from "./routes/alexaOAuth.routes.js";
 import tiendaRoutes from "./routes/tienda.routes.js";
 import creditoRoutes from "./routes/credito.routes.js";
-import creditoCronRoutes from "./routes/creditoCron.routes.js";
 
 const app = express();
 
@@ -64,9 +62,9 @@ app.use(
 );
 
 // Health
-app.get("/", (req, res) => res.send("API Moda Sarita v1.0.0 âœ…"));
+app.get("/", (req, res) => res.send("API Moda Sarita v1.0.0 ✅"));
 
-// âœ… Montaje de rutas
+// ✅ Montaje de rutas
 app.use("/api/auth", authRoutes);
 app.use("/api/security", securityRoutes);
 app.use("/api/suscripcion", suscripcionRoutes);
@@ -82,7 +80,6 @@ app.use("/api/cuenta", cuentaRoutes);
 app.use("/api/checkout", checkoutRoutes);
 app.use("/api/cupones", cuponesRoutes);
 app.use("/api/ventas", ventasRoutes);
-app.use("/api/corte-caja", corteCajaRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/monitoring", monitoringRoutes);
 // app.use("/api/backups", backupsRoutes);
@@ -97,8 +94,5 @@ app.use("/api/marketing", marketingRoutes);
 app.use("/api/alexa/oauth", alexaOAuthRoutes);
 app.use("/api/tienda", tiendaRoutes);
 app.use("/api/creditos", creditoRoutes);
-app.use("/api/cron/creditos", creditoCronRoutes);
 
 export default app;
-
-

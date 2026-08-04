@@ -8,7 +8,6 @@ import {
   createDireccion,
   setDireccionPrincipal,
   deleteDireccion,
-  abonarCreditoCliente,
   getMovimientosCredito,
   setClientePuedeApartarInterna,
 } from "../models/clientes.model.js";
@@ -158,30 +157,12 @@ export async function getClienteMovimientosCredito(req, res) {
 }
 
 export async function postAbonoCredito(req, res) {
-  try {
-    const id = String(req.params.id);
-    const { monto, metodo_pago, referencia_externa } = req.body || {};
-
-    if (!monto || Number(monto) <= 0) {
-      return res
-        .status(400)
-        .json({ ok: false, msg: "Monto inválido o requerido" });
-    }
-
-    const row = await abonarCreditoCliente(req.db, id, { monto, metodo_pago });
-    if (!row) {
-      return res.status(404).json({ ok: false, msg: "Cliente no encontrado" });
-    }
-
-    return res.json({ ok: true, data: row });
-  } catch (err) {
-    console.error("postAbonoCredito error:", err);
-    return res.status(500).json({
-      ok: false,
-      msg: "Error registrando el abono",
-      detail: err.message,
-    });
-  }
+  return res.status(410).json({
+    ok: false,
+    code: "CREDIT_LEGACY_ENDPOINT_DISABLED",
+    msg: "Este endpoint fue retirado. Registra el abono sobre un crédito específico.",
+    endpoint_nuevo: "/api/creditos/:creditoId/abonos",
+  });
 }
 
 export async function postDireccion(req, res) {

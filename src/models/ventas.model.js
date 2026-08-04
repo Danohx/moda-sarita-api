@@ -1,3 +1,36 @@
+import crypto from "node:crypto";
+import {
+  crearCreditoEnTransaccion,
+  obtenerParametrosCredito,
+} from "./credito.model.js";
+import { calcularPlanCredito } from "../services/credito.service.js";
+import {
+  validarIdempotencyKey,
+  validarPayloadCreditoPOS,
+} from "../validators/credito.validator.js";
+
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function buildPosRequestHash(payload) {
+  return crypto
+    .createHash("sha256")
+    .update(stableStringify(payload))
+    .digest("hex");
+}
+
 function toMoney(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
@@ -64,20 +97,21 @@ export async function crearVentaPOS(
     cupon_id = null,
     metodo_pago,
     referencia_externa = null,
-    tipo = "VENTA_POS",
+    credito = null,
+    idempotency_key = null,
     posConfig = {},
   },
 ) {
   if (!Array.isArray(items) || items.length === 0) {
-    const e = new Error("items requerido");
-    e.code = "VALIDATION";
-    throw e;
+    const error = new Error("items requerido");
+    error.code = "VALIDATION";
+    throw error;
   }
 
   if (!metodo_pago) {
-    const e = new Error("metodo_pago requerido");
-    e.code = "VALIDATION";
-    throw e;
+    const error = new Error("metodo_pago requerido");
+    error.code = "VALIDATION";
+    throw error;
   }
 
   const config = {
@@ -89,220 +123,299 @@ export async function crearVentaPOS(
     ...posConfig,
   };
 
-  const metodoPagoFinal = metodo_pago || config.metodoPagoDefault;
-
-  if (!config.permitirVentaSinCliente && !cliente_id) {
-    const e = new Error(
-      "La configuración actual requiere seleccionar un cliente para vender.",
-    );
-    e.code = "VALIDATION";
-    throw e;
-  }
-
-  if (!config.permitirDescuentosManuales && Number(descuento || 0) > 0) {
-    const e = new Error("Los descuentos manuales están desactivados en POS.");
-    e.code = "VALIDATION";
-    throw e;
-  }
-
+  const metodoPagoFinal = String(metodo_pago || config.metodoPagoDefault)
+    .trim()
+    .toUpperCase();
+  const idempotencyKey = validarIdempotencyKey(idempotency_key);
+  const idempotencyHash = idempotencyKey
+    ? buildPosRequestHash({
+        cliente_id,
+        vendedor_id,
+        items,
+        descuento,
+        costo_envio,
+        cupon_id,
+        metodo_pago: metodoPagoFinal,
+        referencia_externa,
+        credito,
+      })
+    : null;
   const client = await db.connect();
 
   try {
     await client.query("BEGIN");
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      vendedor_id ? String(vendedor_id) : "",
+    ]);
 
-    let corte_id = null;
+    if (idempotencyKey) {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`${vendedor_id}:${idempotencyKey}`],
+      );
+
+      const { rows: existingRows } = await client.query(
+        `
+          SELECT p.*
+          FROM ventas.pedidos p
+          WHERE p.vendedor_id = $1::uuid
+            AND p.idempotency_key = $2
+          LIMIT 1
+        `,
+        [vendedor_id, idempotencyKey],
+      );
+
+      if (existingRows[0]) {
+        const existing = existingRows[0];
+
+        if (
+          existing.idempotency_hash &&
+          existing.idempotency_hash !== idempotencyHash
+        ) {
+          const error = new Error(
+            "La llave de idempotencia ya fue utilizada con un payload diferente.",
+          );
+          error.code = "CONFLICT";
+          throw error;
+        }
+
+        const { rows: creditRows } = await client.query(
+          `SELECT * FROM clientes.creditos WHERE pedido_id = $1::uuid LIMIT 1`,
+          [existing.id],
+        );
+        const existingCredit = creditRows[0] || null;
+        let cuotas = [];
+        let enganchePago = null;
+
+        if (existingCredit) {
+          const { rows } = await client.query(
+            `
+              SELECT *
+              FROM clientes.credito_cuotas
+              WHERE credito_id = $1::uuid
+              ORDER BY numero_cuota
+            `,
+            [existingCredit.id],
+          );
+          cuotas = rows;
+
+          const { rows: downPaymentRows } = await client.query(
+            `
+              SELECT *
+              FROM ventas.pagos
+              WHERE credito_id = $1::uuid
+                AND concepto = 'ENGANCHE_CREDITO'
+                AND estado = 'CONFIRMADO'
+              ORDER BY fecha_pago, id
+              LIMIT 1
+            `,
+            [existingCredit.id],
+          );
+          enganchePago = downPaymentRows[0] || null;
+        }
+
+        await client.query("COMMIT");
+        return {
+          ...existing,
+          credito: existingCredit,
+          cuotas,
+          enganche_pago: enganchePago,
+          idempotent_replay: true,
+        };
+      }
+    }
+
+    if (!config.permitirVentaSinCliente && !cliente_id) {
+      const error = new Error(
+        "La configuración actual requiere seleccionar un cliente para vender.",
+      );
+      error.code = "VALIDATION";
+      throw error;
+    }
+
+    if (!config.permitirDescuentosManuales && Number(descuento || 0) > 0) {
+      const error = new Error(
+        "Los descuentos manuales están desactivados en POS.",
+      );
+      error.code = "VALIDATION";
+      throw error;
+    }
 
     if (config.requerirCorteAbierto) {
       const corteRes = await client.query(
-        `SELECT id FROM ventas.corte_caja WHERE usuario_id = $1 AND fin_turno IS NULL LIMIT 1`,
+        `
+          SELECT id
+          FROM ventas.corte_caja
+          WHERE usuario_id = $1
+            AND fin_turno IS NULL
+          LIMIT 1
+        `,
         [vendedor_id],
       );
 
       if (corteRes.rows.length === 0) {
-        const e = new Error("Debes abrir turno/corte antes de vender.");
-        e.code = "VALIDATION";
-        throw e;
+        const error = new Error("Debes abrir turno/corte antes de vender.");
+        error.code = "VALIDATION";
+        throw error;
       }
-
-      corte_id = corteRes.rows[0].id;
     }
 
     const metodoPagoConfig = await getMetodoPagoPOS(client, metodoPagoFinal);
 
     if (!metodoPagoConfig || metodoPagoConfig.activo_pos !== true) {
-      const e = new Error(
+      const error = new Error(
         "El método de pago seleccionado no está activo para POS.",
       );
-      e.code = "VALIDATION";
-      throw e;
+      error.code = "VALIDATION";
+      throw error;
     }
 
     const esPagoCredito = metodoPagoConfig.es_credito === true;
 
     if (esPagoCredito && !cliente_id) {
-      const e = new Error(
-        "Para pagar con crédito de tienda debes seleccionar un cliente.",
+      const error = new Error(
+        "Para vender a crédito debes seleccionar un cliente.",
       );
-      e.code = "VALIDATION";
-      throw e;
+      error.code = "VALIDATION";
+      throw error;
+    }
+
+    if (!esPagoCredito && credito) {
+      const error = new Error(
+        "El bloque credito solo puede enviarse con CREDITO_TIENDA.",
+      );
+      error.code = "VALIDATION";
+      throw error;
     }
 
     if (
+      !esPagoCredito &&
       metodoPagoConfig.requiere_referencia === true &&
       !String(referencia_externa || "").trim()
     ) {
-      const e = new Error("Este método de pago requiere referencia.");
-      e.code = "VALIDATION";
-      throw e;
+      const error = new Error("Este método de pago requiere referencia.");
+      error.code = "VALIDATION";
+      throw error;
     }
 
+    const creditoInput = esPagoCredito
+      ? validarPayloadCreditoPOS(credito)
+      : null;
     const normalizedItems = [];
 
-    for (const it of items) {
-      const varianteId = String(it.variante_id || "");
-      const cantidad = Number(it.cantidad);
+    for (const item of items) {
+      const varianteId = String(item.variante_id || "");
+      const cantidad = Number(item.cantidad);
 
       if (!varianteId || !Number.isInteger(cantidad) || cantidad <= 0) {
-        const e = new Error("Cada item requiere variante_id y cantidad > 0");
-        e.code = "VALIDATION";
-        throw e;
+        const error = new Error(
+          "Cada item requiere variante_id y cantidad > 0",
+        );
+        error.code = "VALIDATION";
+        throw error;
       }
 
-      const v = await getVarianteForUpdate(client, varianteId);
+      const variante = await getVarianteForUpdate(client, varianteId);
 
-      if (!v) {
-        const e = new Error(`Variante no encontrada: ${varianteId}`);
-        e.code = "NOT_FOUND";
-        throw e;
+      if (!variante) {
+        const error = new Error(`Variante no encontrada: ${varianteId}`);
+        error.code = "NOT_FOUND";
+        throw error;
       }
 
-      if (!v.activo) {
-        const e = new Error(`La variante ${varianteId} está inactiva`);
-        e.code = "VALIDATION";
-        throw e;
+      if (!variante.activo) {
+        const error = new Error(`La variante ${varianteId} está inactiva`);
+        error.code = "VALIDATION";
+        throw error;
       }
 
-      const disponible = Number(v.stock_fisico) - Number(v.stock_apartado);
+      const disponible =
+        Number(variante.stock_fisico) - Number(variante.stock_apartado);
 
       if (disponible < cantidad) {
-        const e = new Error(
+        const error = new Error(
           `Stock insuficiente en variante ${varianteId}. Disponible=${disponible}`,
         );
-        e.code = "STOCK";
-        throw e;
+        error.code = "STOCK";
+        throw error;
       }
 
-      const precio_unitario =
-        it.precio_unitario !== undefined && it.precio_unitario !== null
-          ? toMoney(it.precio_unitario)
-          : toMoney(v.precio_venta);
+      const precioUnitario =
+        item.precio_unitario !== undefined && item.precio_unitario !== null
+          ? toMoney(item.precio_unitario)
+          : toMoney(variante.precio_venta);
 
-      if (precio_unitario < 0) {
-        const e = new Error("precio_unitario inválido");
-        e.code = "VALIDATION";
-        throw e;
+      if (precioUnitario <= 0) {
+        const error = new Error("precio_unitario debe ser mayor a 0");
+        error.code = "VALIDATION";
+        throw error;
       }
 
       normalizedItems.push({
         variante_id: varianteId,
         cantidad,
-        precio_unitario,
+        precio_unitario: precioUnitario,
       });
     }
 
-    let subtotal = 0;
-    for (const it of normalizedItems) {
-      subtotal += toMoney(it.precio_unitario * it.cantidad);
-    }
-
-    const descNum = Number(descuento || 0);
-    const envioNum = Number(costo_envio || 0);
+    const subtotal = toMoney(
+      normalizedItems.reduce(
+        (sum, item) => sum + item.precio_unitario * item.cantidad,
+        0,
+      ),
+    );
+    const descNum = toMoney(descuento || 0);
+    const envioNum = toMoney(costo_envio || 0);
 
     if (descNum < 0) {
-      const e = new Error("El descuento no puede ser negativo.");
-      e.code = "VALIDATION";
-      throw e;
+      const error = new Error("El descuento no puede ser negativo.");
+      error.code = "VALIDATION";
+      throw error;
     }
 
     if (descNum > subtotal) {
-      const e = new Error("El descuento no puede exceder el subtotal.");
-      e.code = "VALIDATION";
-      throw e;
+      const error = new Error("El descuento no puede exceder el subtotal.");
+      error.code = "VALIDATION";
+      throw error;
     }
 
-    const descuentoMaximo =
-      subtotal * (Number(config.descuentoManualMaximoPercent || 0) / 100);
+    const descuentoMaximo = toMoney(
+      subtotal * (Number(config.descuentoManualMaximoPercent || 0) / 100),
+    );
 
     if (descNum > descuentoMaximo) {
-      const e = new Error(
+      const error = new Error(
         `El descuento excede el máximo permitido (${config.descuentoManualMaximoPercent}%).`,
       );
-      e.code = "VALIDATION";
-      throw e;
+      error.code = "VALIDATION";
+      throw error;
     }
 
     const total = toMoney(subtotal - descNum + envioNum);
 
-    if (total < 0) {
-      const e = new Error("El total no puede ser negativo");
-      e.code = "VALIDATION";
-      throw e;
+    if (total <= 0) {
+      const error = new Error("El total de la venta debe ser mayor a 0.");
+      error.code = "VALIDATION";
+      throw error;
     }
 
-    let clienteCredito = null;
+    let planCredito = null;
 
     if (esPagoCredito) {
-      const clienteCreditoRes = await client.query(
-        `
-    SELECT
-      id,
-      nombres,
-      apellido_paterno,
-      apellido_materno,
-      tiene_credito,
-      limite_credito,
-      saldo_deudor,
-      activo
-    FROM clientes.clientes
-    WHERE id = $1
-    FOR UPDATE
-    `,
-        [cliente_id],
-      );
-
-      clienteCredito = clienteCreditoRes.rows[0];
-
-      if (!clienteCredito || clienteCredito.activo !== true) {
-        const e = new Error(
-          "El cliente seleccionado no existe o está inactivo.",
-        );
-        e.code = "VALIDATION";
-        throw e;
-      }
-
-      if (clienteCredito.tiene_credito !== true) {
-        const e = new Error("El cliente seleccionado no tiene crédito activo.");
-        e.code = "VALIDATION";
-        throw e;
-      }
-
-      const limiteCredito = Number(clienteCredito.limite_credito || 0);
-      const saldoDeudor = Number(clienteCredito.saldo_deudor || 0);
-      const disponibleCredito = limiteCredito - saldoDeudor;
-
-      if (total > disponibleCredito) {
-        const e = new Error(
-          `Crédito insuficiente. Disponible: $${disponibleCredito.toFixed(2)}.`,
-        );
-        e.code = "VALIDATION";
-        throw e;
-      }
+      const parametrosCredito = await obtenerParametrosCredito(client);
+      planCredito = calcularPlanCredito({
+        totalCompra: total,
+        enganche: creditoInput.enganche,
+        plazoMeses: creditoInput.plazo_meses,
+        frecuenciaPago: creditoInput.frecuencia_pago,
+        fechaPrimerVencimiento: creditoInput.fecha_primer_vencimiento,
+        configuracion: parametrosCredito,
+      });
     }
 
-    const pRes = await client.query(
+    const { rows: pedidoRows } = await client.query(
       `
-      INSERT INTO ventas.pedidos
-        (
+        INSERT INTO ventas.pedidos (
           cliente_id,
           vendedor_id,
           tipo,
@@ -311,131 +424,150 @@ export async function crearVentaPOS(
           descuento,
           costo_envio,
           total,
-          cupon_id
+          cupon_id,
+          metodo_pago_solicitado,
+          idempotency_key,
+          idempotency_hash
         )
-      VALUES
-        ($1, $2, $3, 'PENDIENTE', $4, $5, $6, $7, $8)
-      RETURNING *
+        VALUES (
+          $1, $2, 'PUNTO_VENTA', 'PENDIENTE',
+          $3, $4, $5, $6, $7, $8, $9, $10
+        )
+        RETURNING *
       `,
       [
         cliente_id,
         vendedor_id,
-        tipo,
         subtotal,
-        descuento,
-        costo_envio,
+        descNum,
+        envioNum,
         total,
         cupon_id,
+        metodoPagoFinal,
+        idempotencyKey,
+        idempotencyHash,
       ],
     );
 
-    const pedido = pRes.rows[0];
+    const pedido = pedidoRows[0];
 
-    for (const it of normalizedItems) {
+    for (const item of normalizedItems) {
       await client.query(
         `
-        INSERT INTO ventas.detalles_pedido (pedido_id, variante_id, cantidad, precio_unitario)
-        VALUES ($1,$2,$3,$4)
+          INSERT INTO ventas.detalles_pedido (
+            pedido_id,
+            variante_id,
+            cantidad,
+            precio_unitario
+          )
+          VALUES ($1, $2, $3, $4)
         `,
-        [pedido.id, it.variante_id, it.cantidad, it.precio_unitario],
+        [pedido.id, item.variante_id, item.cantidad, item.precio_unitario],
       );
 
       await client.query(
         `
-        UPDATE inventario.variantes_producto
-        SET stock_fisico = stock_fisico - $2,
+          UPDATE inventario.variantes_producto
+          SET
+            stock_fisico = stock_fisico - $2,
             updated_at = now()
-        WHERE id = $1
+          WHERE id = $1
         `,
-        [it.variante_id, it.cantidad],
+        [item.variante_id, item.cantidad],
       );
 
       await client.query(
         `
-        INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo, tipo)
-        VALUES ($1,$2,$3,$4,'SALIDA')
+          INSERT INTO inventario.movimientos (
+            variante_id,
+            usuario_id,
+            cantidad,
+            motivo,
+            tipo
+          )
+          VALUES ($1, $2, $3, $4, 'SALIDA')
         `,
         [
-          it.variante_id,
+          item.variante_id,
           vendedor_id,
-          -Math.abs(it.cantidad),
+          -Math.abs(item.cantidad),
           `VENTA POS folio ${pedido.folio}`,
         ],
       );
     }
 
-    await client.query(
-      `
-      INSERT INTO ventas.pagos
-        (pedido_id, monto, metodo, referencia_externa, usuario_id)
-      VALUES
-        ($1,$2,$3,$4,$5)
-      `,
-      [pedido.id, total, metodoPagoFinal, referencia_externa, vendedor_id],
-    );
+    let creditoResult = null;
 
-    if (esPagoCredito && clienteCredito) {
-      const saldoAnterior = Number(clienteCredito.saldo_deudor || 0);
-      const saldoResultante = toMoney(saldoAnterior + total);
-
+    if (esPagoCredito) {
+      creditoResult = await crearCreditoEnTransaccion(client, {
+        clienteId: cliente_id,
+        pedidoId: pedido.id,
+        plan: planCredito,
+        origen: "POS",
+        usuarioId: vendedor_id,
+        pagoEnganche:
+          planCredito.enganche > 0
+            ? {
+                metodo: creditoInput.metodo_enganche,
+                referenciaExterna: creditoInput.referencia_enganche,
+                canal: "POS",
+              }
+            : null,
+      });
+    } else {
       await client.query(
         `
-        UPDATE clientes.clientes
-        SET
-          saldo_deudor = $2,
-          fecha_actualizacion_credito = now()
-        WHERE id = $1
+          INSERT INTO ventas.pagos (
+            pedido_id,
+            monto,
+            metodo,
+            referencia_externa,
+            concepto,
+            estado,
+            usuario_id
+          )
+          VALUES (
+            $1, $2, $3::public.metodo_pago_enum, $4,
+            'PAGO_TOTAL', 'CONFIRMADO', $5
+          )
         `,
-        [cliente_id, saldoResultante],
-      );
-
-      await client.query(
-        `
-    INSERT INTO clientes.movimientos_credito
-      (
-        cliente_id,
-        usuario_id,
-        pedido_id,
-        tipo,
-        descripcion,
-        monto,
-        saldo_anterior,
-        saldo_resultante,
-        metodo_pago,
-        referencia_externa
-      )
-    VALUES
-      ($1,$2,$3,'COMPRA',$4,$5,$6,$7,$8,$9)
-    `,
         [
-          cliente_id,
-          vendedor_id,
           pedido.id,
-          `Compra POS folio ${pedido.folio}`,
           total,
-          saldoAnterior,
-          saldoResultante,
           metodoPagoFinal,
-          referencia_externa,
+          referencia_externa || null,
+          vendedor_id,
         ],
       );
     }
 
-    const p2 = await client.query(
-      `UPDATE ventas.pedidos SET estado = 'PAGADO' WHERE id = $1 RETURNING *`,
+    const { rows: finalRows } = await client.query(
+      `
+        UPDATE ventas.pedidos
+        SET estado = 'PAGADO'
+        WHERE id = $1::uuid
+        RETURNING *
+      `,
       [pedido.id],
     );
 
     await client.query("COMMIT");
-    return p2.rows[0];
-  } catch (err) {
+
+    return {
+      ...finalRows[0],
+      credito: creditoResult?.credito || null,
+      cuotas: creditoResult?.cuotas || [],
+      enganche_pago: creditoResult?.enganche_pago || null,
+      elegibilidad_credito: creditoResult?.elegibilidad || null,
+      idempotent_replay: false,
+    };
+  } catch (error) {
     await client.query("ROLLBACK");
-    throw err;
+    throw error;
   } finally {
     client.release();
   }
 }
-
 export async function crearApartado(
   db,
   {
@@ -947,7 +1079,7 @@ async function getDesgloseMetodosCorte(
         COALESCE(SUM(pg.monto), 0)::numeric(10,2) AS total,
         COUNT(*)::int AS operaciones
       FROM ventas.pagos pg
-      JOIN ventas.pedidos pe ON pe.id = pg.pedido_id
+      LEFT JOIN ventas.pedidos pe ON pe.id = pg.pedido_id
       WHERE pg.estado = 'CONFIRMADO'
         AND COALESCE(pg.usuario_id, pe.vendedor_id) = $1
         AND pg.fecha_pago >= $2
@@ -1348,7 +1480,9 @@ export async function listarHistorialVentas(
 
   if (fecha_fin) {
     params.push(fecha_fin);
-    where.push(`p.fecha_creacion < ($${params.length}::date + INTERVAL '1 day')`);
+    where.push(
+      `p.fecha_creacion < ($${params.length}::date + INTERVAL '1 day')`,
+    );
   }
 
   if (vendedor_id) {
