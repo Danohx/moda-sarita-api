@@ -486,41 +486,97 @@ export async function eliminarMiDireccion(db, usuarioId, direccionId) {
 export async function obtenerMiCredito(db, usuarioId) {
   const cliente = await requireCliente(db, usuarioId);
 
-  const { rows: resumenRows } = await db.query(
-    `
-      SELECT
-        cliente_id,
-        cliente_nombre,
-        tiene_credito,
-        limite_credito,
-        saldo_deudor,
-        credito_disponible,
-        creditos_activos,
-        creditos_en_mora,
-        creditos_incumplidos,
-        cuotas_vencidas,
-        total_vencido,
-        proxima_fecha_pago,
-        monto_proximo_pago,
-        dias_maximos_atraso
-      FROM clientes.v_estado_credito_cliente
-      WHERE cliente_id = $1::uuid
-      LIMIT 1
-    `,
-    [cliente.id],
-  );
+  const [metricasResult, proximaCuotaResult, lastResult] = await Promise.all([
+    db.query(
+      `
+        SELECT
+          COUNT(DISTINCT c.id) FILTER (
+            WHERE c.estado IN ('ACTIVO', 'EN_MORA', 'INCUMPLIDO')
+          )::int AS creditos_activos,
+          COUNT(DISTINCT c.id) FILTER (
+            WHERE c.estado = 'EN_MORA'
+          )::int AS creditos_en_mora,
+          COUNT(DISTINCT c.id) FILTER (
+            WHERE c.estado = 'INCUMPLIDO'
+          )::int AS creditos_incumplidos,
+          COUNT(cc.id) FILTER (
+            WHERE cc.estado = 'VENCIDA'
+              AND cc.saldo_pendiente > 0
+          )::int AS cuotas_vencidas,
+          COALESCE(
+            SUM(cc.saldo_pendiente) FILTER (
+              WHERE cc.estado = 'VENCIDA'
+                AND cc.saldo_pendiente > 0
+            ),
+            0
+          )::numeric(12,2) AS total_vencido,
+          COALESCE(
+            MAX(
+              GREATEST(CURRENT_DATE - cc.fecha_vencimiento, 0)
+            ) FILTER (
+              WHERE cc.estado = 'VENCIDA'
+                AND cc.saldo_pendiente > 0
+            ),
+            0
+          )::int AS dias_maximos_atraso
+        FROM clientes.creditos c
+        LEFT JOIN clientes.credito_cuotas cc
+          ON cc.credito_id = c.id
+        WHERE c.cliente_id = $1::uuid
+      `,
+      [cliente.id],
+    ),
+    db.query(
+      `
+        SELECT
+          cc.fecha_vencimiento AS proxima_fecha_pago,
+          cc.saldo_pendiente AS monto_proximo_pago
+        FROM clientes.credito_cuotas cc
+        JOIN clientes.creditos c ON c.id = cc.credito_id
+        WHERE c.cliente_id = $1::uuid
+          AND c.estado IN ('ACTIVO', 'EN_MORA', 'INCUMPLIDO')
+          AND cc.saldo_pendiente > 0
+          AND cc.estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
+        ORDER BY
+          CASE WHEN cc.estado = 'VENCIDA' THEN 0 ELSE 1 END,
+          cc.fecha_vencimiento,
+          cc.numero_cuota
+        LIMIT 1
+      `,
+      [cliente.id],
+    ),
+    db.query(
+      `
+        SELECT
+          id,
+          credito_id,
+          cuota_id,
+          fecha,
+          tipo,
+          descripcion,
+          monto,
+          saldo_resultante,
+          metodo_pago
+        FROM clientes.movimientos_credito
+        WHERE cliente_id = $1::uuid
+        ORDER BY fecha DESC, id DESC
+        LIMIT 1
+      `,
+      [cliente.id],
+    ),
+  ]);
 
-  const resumen = resumenRows[0] || {};
-  const limite = Number(resumen.limite_credito ?? cliente.limite_credito ?? 0);
-  const saldo = Number(resumen.saldo_deudor ?? cliente.saldo_deudor ?? 0);
-  const disponible = Number(
-    resumen.credito_disponible ?? Math.max(limite - saldo, 0),
-  );
-  const cuotasVencidas = Number(resumen.cuotas_vencidas || 0);
-  const totalVencido = Number(resumen.total_vencido || 0);
-  const creditosEnMora = Number(resumen.creditos_en_mora || 0);
-  const creditosIncumplidos = Number(resumen.creditos_incumplidos || 0);
-  const habilitado = (resumen.tiene_credito ?? cliente.tiene_credito) === true;
+  const metricas = metricasResult.rows[0] || {};
+  const proximaCuota = proximaCuotaResult.rows[0] || {};
+
+  const limite = Number(cliente.limite_credito || 0);
+  const saldo = Number(cliente.saldo_deudor || 0);
+  const disponible = Math.max(limite - saldo, 0);
+  const cuotasVencidas = Number(metricas.cuotas_vencidas || 0);
+  const totalVencido = Number(metricas.total_vencido || 0);
+  const creditosEnMora = Number(metricas.creditos_en_mora || 0);
+  const creditosIncumplidos = Number(metricas.creditos_incumplidos || 0);
+  const habilitado = cliente.tiene_credito === true;
 
   let estado = "AL_CORRIENTE";
   if (!habilitado) estado = "SIN_CREDITO";
@@ -529,38 +585,20 @@ export async function obtenerMiCredito(db, usuarioId) {
   else if (creditosEnMora > 0 || cuotasVencidas > 0) estado = "EN_MORA";
   else if (disponible <= 0) estado = "AL_LIMITE";
 
-  const lastResult = await db.query(
-    `
-      SELECT
-        id,
-        credito_id,
-        cuota_id,
-        fecha,
-        tipo,
-        descripcion,
-        monto,
-        saldo_resultante,
-        metodo_pago
-      FROM clientes.movimientos_credito
-      WHERE cliente_id = $1::uuid
-      ORDER BY fecha DESC, id DESC
-      LIMIT 1
-    `,
-    [cliente.id],
-  );
-
   return {
     cliente_id: cliente.id,
-    cliente_nombre:
-      resumen.cliente_nombre ||
-      [cliente.nombres, cliente.apellido_paterno, cliente.apellido_materno]
-        .filter(Boolean)
-        .join(" "),
+    cliente_nombre: [
+      cliente.nombres,
+      cliente.apellido_paterno,
+      cliente.apellido_materno,
+    ]
+      .filter(Boolean)
+      .join(" "),
     habilitado,
     limite,
     limite_credito: limite,
     saldo_deudor: saldo,
-    credito_disponible: Math.max(disponible, 0),
+    credito_disponible: disponible,
     porcentaje_utilizado:
       limite > 0 ? Math.round((saldo / limite) * 10000) / 100 : 0,
     estado,
@@ -568,21 +606,22 @@ export async function obtenerMiCredito(db, usuarioId) {
       habilitado &&
       disponible > 0 &&
       creditosIncumplidos === 0 &&
-      creditosEnMora === 0,
+      creditosEnMora === 0 &&
+      cuotasVencidas === 0,
     puede_apartar: cliente.puede_apartar === true,
     fecha_activacion: cliente.fecha_activacion_credito,
     ultima_actualizacion: cliente.fecha_actualizacion_credito,
-    proxima_fecha_pago: resumen.proxima_fecha_pago || null,
+    proxima_fecha_pago: proximaCuota.proxima_fecha_pago || null,
     monto_proximo_pago:
-      resumen.monto_proximo_pago === null ||
-      resumen.monto_proximo_pago === undefined
+      proximaCuota.monto_proximo_pago === null ||
+      proximaCuota.monto_proximo_pago === undefined
         ? null
-        : Number(resumen.monto_proximo_pago),
+        : Number(proximaCuota.monto_proximo_pago),
     pagos_vencidos: cuotasVencidas,
     cuotas_vencidas: cuotasVencidas,
     total_vencido: totalVencido,
-    dias_maximos_atraso: Number(resumen.dias_maximos_atraso || 0),
-    creditos_activos: Number(resumen.creditos_activos || 0),
+    dias_maximos_atraso: Number(metricas.dias_maximos_atraso || 0),
+    creditos_activos: Number(metricas.creditos_activos || 0),
     creditos_en_mora: creditosEnMora,
     creditos_incumplidos: creditosIncumplidos,
     ultimo_movimiento: lastResult.rows[0] || null,
