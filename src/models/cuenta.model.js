@@ -65,7 +65,11 @@ async function requireCliente(client, usuarioId, options) {
   }
 
   if (cliente.activo !== true) {
-    throw modelError("El perfil del cliente está inactivo.", 403, "CLIENT_INACTIVE");
+    throw modelError(
+      "El perfil del cliente está inactivo.",
+      403,
+      "CLIENT_INACTIVE",
+    );
   }
 
   return cliente;
@@ -112,20 +116,19 @@ export async function obtenerMiCuenta(db, usuarioId) {
 export async function actualizarMiPerfil(
   db,
   usuarioId,
-  {
-    nombres,
-    apellido_paterno,
-    apellido_materno,
-    telefono,
-  } = {},
+  { nombres, apellido_paterno, apellido_materno, telefono } = {},
 ) {
   const client = await db.connect();
 
   try {
     await client.query("BEGIN");
-    await client.query("SELECT set_config('app.user_id', $1, true)", [usuarioId]);
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuarioId,
+    ]);
 
-    const cliente = await requireCliente(client, usuarioId, { forUpdate: true });
+    const cliente = await requireCliente(client, usuarioId, {
+      forUpdate: true,
+    });
 
     const nextNombres =
       nombres === undefined ? cliente.nombres : String(nombres).trim();
@@ -221,9 +224,13 @@ export async function crearMiDireccion(db, usuarioId, payload = {}) {
 
   try {
     await client.query("BEGIN");
-    await client.query("SELECT set_config('app.user_id', $1, true)", [usuarioId]);
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuarioId,
+    ]);
 
-    const cliente = await requireCliente(client, usuarioId, { forUpdate: true });
+    const cliente = await requireCliente(client, usuarioId, {
+      forUpdate: true,
+    });
 
     const countResult = await client.query(
       `SELECT COUNT(*)::int AS total FROM clientes.direcciones WHERE cliente_id = $1`,
@@ -231,7 +238,8 @@ export async function crearMiDireccion(db, usuarioId, payload = {}) {
     );
 
     const esPrincipal =
-      Boolean(payload.es_principal) || Number(countResult.rows[0]?.total || 0) === 0;
+      Boolean(payload.es_principal) ||
+      Number(countResult.rows[0]?.total || 0) === 0;
 
     if (esPrincipal) {
       await client.query(
@@ -291,9 +299,13 @@ export async function actualizarMiDireccion(
 
   try {
     await client.query("BEGIN");
-    await client.query("SELECT set_config('app.user_id', $1, true)", [usuarioId]);
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuarioId,
+    ]);
 
-    const cliente = await requireCliente(client, usuarioId, { forUpdate: true });
+    const cliente = await requireCliente(client, usuarioId, {
+      forUpdate: true,
+    });
 
     const currentResult = await client.query(
       `
@@ -336,7 +348,9 @@ export async function actualizarMiDireccion(
       [
         direccionId,
         cliente.id,
-        payload.calle === undefined ? current.calle : String(payload.calle).trim(),
+        payload.calle === undefined
+          ? current.calle
+          : String(payload.calle).trim(),
         payload.numero_exterior === undefined
           ? current.numero_exterior
           : nullableText(payload.numero_exterior),
@@ -381,7 +395,9 @@ export async function establecerMiDireccionPrincipal(
 
   try {
     await client.query("BEGIN");
-    const cliente = await requireCliente(client, usuarioId, { forUpdate: true });
+    const cliente = await requireCliente(client, usuarioId, {
+      forUpdate: true,
+    });
 
     const owned = await client.query(
       `SELECT id FROM clientes.direcciones WHERE id = $1::uuid AND cliente_id = $2::uuid`,
@@ -422,7 +438,9 @@ export async function eliminarMiDireccion(db, usuarioId, direccionId) {
 
   try {
     await client.query("BEGIN");
-    const cliente = await requireCliente(client, usuarioId, { forUpdate: true });
+    const cliente = await requireCliente(client, usuarioId, {
+      forUpdate: true,
+    });
 
     const { rows } = await client.query(
       `
@@ -467,13 +485,62 @@ export async function eliminarMiDireccion(db, usuarioId, direccionId) {
 
 export async function obtenerMiCredito(db, usuarioId) {
   const cliente = await requireCliente(db, usuarioId);
-  const limite = Number(cliente.limite_credito || 0);
-  const saldo = Number(cliente.saldo_deudor || 0);
-  const disponible = Math.max(limite - saldo, 0);
+
+  const { rows: resumenRows } = await db.query(
+    `
+      SELECT
+        cliente_id,
+        cliente_nombre,
+        tiene_credito,
+        limite_credito,
+        saldo_deudor,
+        credito_disponible,
+        creditos_activos,
+        creditos_en_mora,
+        creditos_incumplidos,
+        cuotas_vencidas,
+        total_vencido,
+        proxima_fecha_pago,
+        monto_proximo_pago,
+        dias_maximos_atraso
+      FROM clientes.v_estado_credito_cliente
+      WHERE cliente_id = $1::uuid
+      LIMIT 1
+    `,
+    [cliente.id],
+  );
+
+  const resumen = resumenRows[0] || {};
+  const limite = Number(resumen.limite_credito ?? cliente.limite_credito ?? 0);
+  const saldo = Number(resumen.saldo_deudor ?? cliente.saldo_deudor ?? 0);
+  const disponible = Number(
+    resumen.credito_disponible ?? Math.max(limite - saldo, 0),
+  );
+  const cuotasVencidas = Number(resumen.cuotas_vencidas || 0);
+  const totalVencido = Number(resumen.total_vencido || 0);
+  const creditosEnMora = Number(resumen.creditos_en_mora || 0);
+  const creditosIncumplidos = Number(resumen.creditos_incumplidos || 0);
+  const habilitado = (resumen.tiene_credito ?? cliente.tiene_credito) === true;
+
+  let estado = "AL_CORRIENTE";
+  if (!habilitado) estado = "SIN_CREDITO";
+  else if (saldo <= 0) estado = "SIN_ADEUDO";
+  else if (creditosIncumplidos > 0) estado = "INCUMPLIDO";
+  else if (creditosEnMora > 0 || cuotasVencidas > 0) estado = "EN_MORA";
+  else if (disponible <= 0) estado = "AL_LIMITE";
 
   const lastResult = await db.query(
     `
-      SELECT id, fecha, tipo, descripcion, monto, saldo_resultante, metodo_pago
+      SELECT
+        id,
+        credito_id,
+        cuota_id,
+        fecha,
+        tipo,
+        descripcion,
+        monto,
+        saldo_resultante,
+        metodo_pago
       FROM clientes.movimientos_credito
       WHERE cliente_id = $1::uuid
       ORDER BY fecha DESC, id DESC
@@ -484,15 +551,40 @@ export async function obtenerMiCredito(db, usuarioId) {
 
   return {
     cliente_id: cliente.id,
-    habilitado: cliente.tiene_credito === true,
+    cliente_nombre:
+      resumen.cliente_nombre ||
+      [cliente.nombres, cliente.apellido_paterno, cliente.apellido_materno]
+        .filter(Boolean)
+        .join(" "),
+    habilitado,
     limite,
+    limite_credito: limite,
     saldo_deudor: saldo,
-    credito_disponible: disponible,
-    porcentaje_utilizado: limite > 0 ? Math.round((saldo / limite) * 10000) / 100 : 0,
-    puede_comprar: cliente.tiene_credito === true && disponible > 0,
+    credito_disponible: Math.max(disponible, 0),
+    porcentaje_utilizado:
+      limite > 0 ? Math.round((saldo / limite) * 10000) / 100 : 0,
+    estado,
+    puede_comprar:
+      habilitado &&
+      disponible > 0 &&
+      creditosIncumplidos === 0 &&
+      creditosEnMora === 0,
     puede_apartar: cliente.puede_apartar === true,
     fecha_activacion: cliente.fecha_activacion_credito,
     ultima_actualizacion: cliente.fecha_actualizacion_credito,
+    proxima_fecha_pago: resumen.proxima_fecha_pago || null,
+    monto_proximo_pago:
+      resumen.monto_proximo_pago === null ||
+      resumen.monto_proximo_pago === undefined
+        ? null
+        : Number(resumen.monto_proximo_pago),
+    pagos_vencidos: cuotasVencidas,
+    cuotas_vencidas: cuotasVencidas,
+    total_vencido: totalVencido,
+    dias_maximos_atraso: Number(resumen.dias_maximos_atraso || 0),
+    creditos_activos: Number(resumen.creditos_activos || 0),
+    creditos_en_mora: creditosEnMora,
+    creditos_incumplidos: creditosIncumplidos,
     ultimo_movimiento: lastResult.rows[0] || null,
   };
 }

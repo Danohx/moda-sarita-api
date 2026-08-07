@@ -25,10 +25,7 @@ function normalizeIp(value) {
 }
 
 export function hashOAuthToken(token) {
-  return crypto
-    .createHash("sha256")
-    .update(String(token))
-    .digest("hex");
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
 }
 
 export function generateOpaqueToken(bytes = 48) {
@@ -66,6 +63,7 @@ export async function findAlexaClientByEmail(db, email) {
         u.apellido_materno,
         u.activo AS usuario_activo,
         u.tfa_enabled,
+        u.tfa_secret,
 
         r.nombre AS rol,
 
@@ -107,6 +105,7 @@ export async function getAlexaClientByUserId(db, userId) {
         u.apellido_materno,
         u.activo AS usuario_activo,
         u.tfa_enabled,
+        u.tfa_secret,
 
         r.nombre AS rol,
 
@@ -143,19 +142,13 @@ export async function getAlexaClientByUserId(db, userId) {
 
 export async function createAlexaAuthorizationCode(
   db,
-  {
-    userId,
-    clientId,
-    redirectUri,
-    scope,
-  },
+  { userId, clientId, redirectUri, scope },
 ) {
   const rawCode = generateOpaqueToken(32);
   const codeHash = hashOAuthToken(rawCode);
 
   const expiresAt = new Date(
-    Date.now() +
-      AUTHORIZATION_CODE_TTL_MINUTES * 60 * 1000,
+    Date.now() + AUTHORIZATION_CODE_TTL_MINUTES * 60 * 1000,
   );
 
   await db.query(
@@ -185,14 +178,7 @@ export async function createAlexaAuthorizationCode(
         $6
       )
     `,
-    [
-      codeHash,
-      userId,
-      clientId,
-      redirectUri,
-      scope,
-      expiresAt,
-    ],
+    [codeHash, userId, clientId, redirectUri, scope, expiresAt],
   );
 
   return {
@@ -203,11 +189,7 @@ export async function createAlexaAuthorizationCode(
 
 export async function consumeAlexaAuthorizationCode(
   db,
-  {
-    code,
-    clientId,
-    redirectUri,
-  },
+  { code, clientId, redirectUri },
 ) {
   const codeHash = hashOAuthToken(code);
 
@@ -241,10 +223,7 @@ export async function consumeAlexaAuthorizationCode(
     );
   }
 
-  const user = await getAlexaClientByUserId(
-    db,
-    authorization.usuario_id,
-  );
+  const user = await getAlexaClientByUserId(db, authorization.usuario_id);
 
   if (!user) {
     throw createOAuthError(
@@ -369,13 +348,7 @@ export async function createAlexaOAuthSession(
           $5
         )
       `,
-      [
-        refreshTokenHash,
-        userId,
-        clientId,
-        scope,
-        refreshExpiresAt,
-      ],
+      [refreshTokenHash, userId, clientId, scope, refreshExpiresAt],
     );
 
     await client.query("COMMIT");
@@ -399,11 +372,7 @@ export async function createAlexaOAuthSession(
 
 export async function rotateAlexaRefreshToken(
   db,
-  {
-    refreshToken,
-    clientId,
-    refreshExpiresAt,
-  },
+  { refreshToken, clientId, refreshExpiresAt },
 ) {
   const client = await db.connect();
 
@@ -451,10 +420,7 @@ export async function rotateAlexaRefreshToken(
       );
     }
 
-    const user = await getAlexaClientByUserId(
-      client,
-      storedToken.usuario_id,
-    );
+    const user = await getAlexaClientByUserId(client, storedToken.usuario_id);
 
     if (!user) {
       throw createOAuthError(
@@ -512,12 +478,7 @@ export async function rotateAlexaRefreshToken(
           AND user_id = $4::uuid
           AND revoked_at IS NULL
       `,
-      [
-        newTokenHash,
-        refreshExpiresAt,
-        storedToken.sid,
-        storedToken.usuario_id,
-      ],
+      [newTokenHash, refreshExpiresAt, storedToken.sid, storedToken.usuario_id],
     );
 
     await client.query("COMMIT");
