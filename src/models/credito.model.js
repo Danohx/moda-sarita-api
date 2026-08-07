@@ -163,7 +163,9 @@ export async function listarCreditos(
 
   if (fechaHasta) {
     params.push(fechaHasta);
-    where.push(`fecha_otorgamiento < ($${params.length}::date + interval '1 day')`);
+    where.push(
+      `fecha_otorgamiento < ($${params.length}::date + interval '1 day')`,
+    );
   }
 
   if (conCuotasVencidas !== undefined) {
@@ -351,7 +353,9 @@ async function validarMetodoPagoReal(
   metodo,
   { canal = "ADMIN", referenciaExterna = null } = {},
 ) {
-  const metodoNormalizado = String(metodo || "").trim().toUpperCase();
+  const metodoNormalizado = String(metodo || "")
+    .trim()
+    .toUpperCase();
   const activeColumn = canal === "POS" ? "activo_pos" : "activo_admin";
   const { rows } = await client.query(
     `
@@ -374,10 +378,7 @@ async function validarMetodoPagoReal(
     throw modelError("El método de pago no está activo para este canal.");
   }
 
-  if (
-    config.es_credito === true ||
-    metodoNormalizado === "CREDITO_TIENDA"
-  ) {
+  if (config.es_credito === true || metodoNormalizado === "CREDITO_TIENDA") {
     throw modelError(
       "El método del enganche o abono debe representar dinero realmente recibido.",
     );
@@ -513,7 +514,21 @@ export async function crearCreditoEnTransaccion(
     configuracion: rawConfig,
   });
 
-  const saldoGlobalAnterior = Number(cliente.saldo_deudor || 0);
+  const limiteCreditoAlOtorgar = centavosADinero(
+    dineroACentavos(cliente.limite_credito || 0),
+  );
+
+  const saldoGlobalAnterior = centavosADinero(
+    dineroACentavos(cliente.saldo_deudor || 0),
+  );
+
+  const creditoDisponibleAntes = centavosADinero(
+    Math.max(
+      0,
+      dineroACentavos(limiteCreditoAlOtorgar) -
+        dineroACentavos(saldoGlobalAnterior),
+    ),
+  );
 
   const { rows: creditRows } = await client.query(
     `
@@ -524,6 +539,11 @@ export async function crearCreditoEnTransaccion(
         enganche,
         monto_financiado,
         saldo_pendiente,
+
+        limite_credito_al_otorgar,
+        saldo_deudor_antes_credito,
+        credito_disponible_antes,
+
         plazo_meses,
         frecuencia_pago,
         numero_cuotas,
@@ -537,10 +557,28 @@ export async function crearCreditoEnTransaccion(
         creado_por
       )
       VALUES (
-        $1, $2, $3, $4, $5, $5, $6,
-        $7::clientes.frecuencia_pago_credito,
-        $8, now(), $9::date, $10::date,
-        'ACTIVO', $11, $12::clientes.origen_credito, true, $13
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $5,
+
+        $6,
+        $7,
+        $8,
+
+        $9,
+        $10::clientes.frecuencia_pago_credito,
+        $11,
+        now(),
+        $12::date,
+        $13::date,
+        'ACTIVO',
+        $14,
+        $15::clientes.origen_credito,
+        true,
+        $16
       )
       RETURNING *
     `,
@@ -550,6 +588,11 @@ export async function crearCreditoEnTransaccion(
       plan.total_compra,
       plan.enganche,
       plan.monto_financiado,
+
+      limiteCreditoAlOtorgar,
+      saldoGlobalAnterior,
+      creditoDisponibleAntes,
+
       plan.plazo_meses,
       plan.frecuencia_pago,
       plan.numero_cuotas,
@@ -630,7 +673,9 @@ export async function crearCreditoEnTransaccion(
       dineroACentavos(plan.monto_financiado),
   );
 
-  if (dineroACentavos(saldoGlobalResultante) !== dineroACentavos(expectedResult)) {
+  if (
+    dineroACentavos(saldoGlobalResultante) !== dineroACentavos(expectedResult)
+  ) {
     throw modelError(
       "La creación del crédito produjo una diferencia de conciliación.",
       "CREDIT_RECONCILIATION",
@@ -689,7 +734,12 @@ export async function crearCredito(db, payload) {
   );
 }
 
-function construirAplicacionesCuotas({ cuotas, monto, configuracion, fechaPago }) {
+function construirAplicacionesCuotas({
+  cuotas,
+  monto,
+  configuracion,
+  fechaPago,
+}) {
   const paymentCents = dineroACentavos(monto);
   let remaining = paymentCents;
   const applications = [];
@@ -702,7 +752,9 @@ function construirAplicacionesCuotas({ cuotas, monto, configuracion, fechaPago }
   });
 
   if (!candidates.length) {
-    throw modelError("No existen cuotas vencidas o exigibles para aplicar el pago.");
+    throw modelError(
+      "No existen cuotas vencidas o exigibles para aplicar el pago.",
+    );
   }
 
   for (const cuota of candidates) {
@@ -726,7 +778,9 @@ function construirAplicacionesCuotas({ cuotas, monto, configuracion, fechaPago }
   }
 
   if (!configuracion.permitePagoMulticuota && applications.length > 1) {
-    throw modelError("La configuración no permite cubrir varias cuotas con un pago.");
+    throw modelError(
+      "La configuración no permite cubrir varias cuotas con un pago.",
+    );
   }
 
   const hasPartialApplication = applications.some(
@@ -954,7 +1008,9 @@ export async function registrarAbonoCredito(
 
       const updatedCredit = updatedCreditRows[0];
       const globalBalanceBefore = Number(credito.saldo_global_cliente || 0);
-      const globalBalanceAfter = Number(clientBalanceRows[0]?.saldo_deudor || 0);
+      const globalBalanceAfter = Number(
+        clientBalanceRows[0]?.saldo_deudor || 0,
+      );
       const expectedGlobalAfter = centavosADinero(
         dineroACentavos(globalBalanceBefore) - paymentCents,
       );

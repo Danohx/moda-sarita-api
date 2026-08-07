@@ -33,6 +33,7 @@ import alexaOAuthRoutes from "./routes/alexaOAuth.routes.js";
 import tiendaRoutes from "./routes/tienda.routes.js";
 import creditoRoutes from "./routes/credito.routes.js";
 import creditoCronRoutes from "./routes/creditoCron.routes.js";
+import analiticaRoutes from "./routes/analitica.routes.js";
 
 const app = express();
 
@@ -98,7 +99,10 @@ app.use("/api/alexa/oauth", alexaOAuthRoutes);
 app.use("/api/tienda", tiendaRoutes);
 app.use("/api/creditos", creditoRoutes);
 app.use("/api/cron/creditos", creditoCronRoutes);
+app.use("/api/analitica", analiticaRoutes);
 
 export default app;
+
+
 
 
