@@ -16,11 +16,12 @@ function makePool(urlEnvName) {
   return new Pool({
     connectionString,
     ssl: isProduction ? { rejectUnauthorized: false } : false,
+    idleTimeoutMillis: 120000,
   });
 }
 
-export const poolInterno = makePool("DATABASE_URL_INTERNA"); 
-export const poolPublico = makePool("DATABASE_URL_PUBLICA"); 
+export const poolInterno = makePool("DATABASE_URL_INTERNA");
+export const poolPublico = makePool("DATABASE_URL_PUBLICA");
 
 if (isProduction) {
   console.log("🚀 Modo Producción: Conectando a PostgreSQL (SSL Activado).");
@@ -35,7 +36,9 @@ export async function verificarConexionesBD() {
       console.log(`✅ Conexión exitosa a PostgreSQL (${name})`);
       client.release();
     } catch (err) {
-      console.error(`❌ Error conectando a la Base de Datos (${name}): ${err.message}`);
+      console.error(
+        `❌ Error conectando a la Base de Datos (${name}): ${err.message}`,
+      );
     }
   };
 

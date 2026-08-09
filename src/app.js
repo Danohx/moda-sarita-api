@@ -44,6 +44,7 @@ const whitelist = [
   "https://moda-sarita-api.vercel.app",
   "http://localhost:5173",
   "http://localhost:5174",
+  "http://localhost:4173", // preview admin
   "https://moda-sarita.com",
   "https://www.moda-sarita.com",
   "https://moda-sarita-admin.pages.dev",
@@ -56,11 +57,15 @@ app.use(
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
 
-      if (whitelist.includes(origin)) callback(null, true);
-      else
+      if (whitelist.includes(origin)) {
+        callback(null, true);
+      } else {
         callback(new Error("Bloqueado por CORS: Tu origen no tiene permiso."));
+      }
     },
+
     credentials: true,
+    maxAge: 600,
   }),
 );
 
@@ -102,7 +107,3 @@ app.use("/api/cron/creditos", creditoCronRoutes);
 app.use("/api/analitica", analiticaRoutes);
 
 export default app;
-
-
-
-

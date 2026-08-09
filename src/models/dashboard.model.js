@@ -1,3 +1,28 @@
+async function runWithConcurrency(tasks, limit = 3) {
+  const results = new Array(tasks.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const index = nextIndex++;
+
+      if (index >= tasks.length) {
+        return;
+      }
+
+      results[index] = await tasks[index]();
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () =>
+    worker(),
+  );
+
+  await Promise.all(workers);
+
+  return results;
+}
+
 function toNumber(value) {
   if (value === null || value === undefined) return 0;
   return Number(value);
@@ -138,7 +163,9 @@ export async function getDashboardData(db, options = {}) {
   } = options;
 
   if (!fromDate || !toDate) {
-    const err = new Error("fromDate y toDate son requeridos para consultar el dashboard.");
+    const err = new Error(
+      "fromDate y toDate son requeridos para consultar el dashboard.",
+    );
     err.code = "VALIDATION";
     throw err;
   }
@@ -151,74 +178,94 @@ export async function getDashboardData(db, options = {}) {
     alertasRes,
     cajaActualRes,
     productosCriticosRes,
-  ] = await Promise.all([
-    db.query(
-      `
-      SELECT *
-      FROM dashboard.fn_resumen_admin($1::date, $2::date)
-      `,
-      [fromDate, toDate],
-    ),
+  ] = await runWithConcurrency(
+    [
+      () =>
+        db.query(
+          `
+            SELECT *
+            FROM dashboard.fn_resumen_admin($1::date, $2::date)
+          `,
+          [fromDate, toDate],
+        ),
 
-    db.query(
-      `
-      SELECT *
-      FROM dashboard.fn_ventas_por_dia($1::date, $2::date)
-      `,
-      [fromDate, toDate],
-    ),
+      () =>
+        db.query(
+          `
+            SELECT *
+            FROM dashboard.fn_ventas_por_dia($1::date, $2::date)
+          `,
+          [fromDate, toDate],
+        ),
 
-    db.query(
-      `
-      SELECT *
-      FROM dashboard.fn_top_productos($1::date, $2::date, $3::int)
-      `,
-      [fromDate, toDate, topLimit],
-    ),
+      () =>
+        db.query(
+          `
+            SELECT *
+            FROM dashboard.fn_top_productos(
+              $1::date,
+              $2::date,
+              $3::int
+            )
+          `,
+          [fromDate, toDate, topLimit],
+        ),
 
-    db.query(
-      `
-      SELECT *
-      FROM dashboard.fn_actividad_reciente($1::date, $2::date, $3::int)
-      `,
-      [fromDate, toDate, actividadLimit],
-    ),
+      () =>
+        db.query(
+          `
+            SELECT *
+            FROM dashboard.fn_actividad_reciente(
+              $1::date,
+              $2::date,
+              $3::int
+            )
+          `,
+          [fromDate, toDate, actividadLimit],
+        ),
 
-    db.query(
-      `
-      SELECT *
-      FROM dashboard.fn_alertas_operativas($1::int)
-      `,
-      [alertasLimit],
-    ),
+      () =>
+        db.query(
+          `
+            SELECT *
+            FROM dashboard.fn_alertas_operativas($1::int)
+          `,
+          [alertasLimit],
+        ),
 
-    db.query(
-      `
-      SELECT *
-      FROM dashboard.v_caja_actual
-      LIMIT 1
-      `,
-    ),
+      () =>
+        db.query(
+          `
+            SELECT *
+            FROM dashboard.v_caja_actual
+            LIMIT 1
+          `,
+        ),
 
-    db.query(
-      `
-      SELECT
-        tipo,
-        severidad,
-        producto_id,
-        variante_id,
-        nombre,
-        detalle,
-        stock_disponible,
-        fecha,
-        prioridad
-      FROM dashboard.v_productos_criticos
-      ORDER BY prioridad ASC, fecha DESC NULLS LAST
-      LIMIT $1
-      `,
-      [productosCriticosLimit],
-    ),
-  ]);
+      () =>
+        db.query(
+          `
+            SELECT
+              tipo,
+              severidad,
+              producto_id,
+              variante_id,
+              nombre,
+              detalle,
+              stock_disponible,
+              fecha,
+              prioridad
+            FROM dashboard.v_productos_criticos
+            ORDER BY
+              prioridad ASC,
+              fecha DESC NULLS LAST
+            LIMIT $1
+          `,
+          [productosCriticosLimit],
+        ),
+    ],
+    3,
+  );
 
   return {
     range: {
