@@ -873,3 +873,73 @@ export async function getPagoTicketData(db, pedidoId, pagoId) {
     saldo_despues: saldoDespues,
   };
 }
+
+export async function cambiarEstadoPedidoWeb(db, pedidoId, nuevoEstado) {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const { rows } = await client.query(
+      `
+        SELECT
+          id,
+          folio,
+          tipo,
+          estado
+        FROM ventas.pedidos
+        WHERE id = $1::uuid
+        FOR UPDATE
+      `,
+      [pedidoId],
+    );
+
+    const pedido = rows[0];
+
+    if (!pedido) {
+      const error = new Error("Pedido no encontrado.");
+      error.code = "NOT_FOUND";
+      throw error;
+    }
+
+    if (pedido.tipo !== "WEB") {
+      const error = new Error("El pedido no es un pedido web.");
+      error.code = "VALIDATION";
+      throw error;
+    }
+
+    const transicionesValidas = {
+      PAGADO: "ENVIADO",
+      ENVIADO: "ENTREGADO",
+    };
+
+    const estadoEsperado = transicionesValidas[pedido.estado];
+
+    if (!estadoEsperado || estadoEsperado !== nuevoEstado) {
+      const error = new Error(
+        `No se permite cambiar un pedido ${pedido.estado} a ${nuevoEstado}.`,
+      );
+      error.code = "INVALID_STATE";
+      throw error;
+    }
+
+    const { rows: updatedRows } = await client.query(
+      `
+        UPDATE ventas.pedidos
+        SET estado = $2
+        WHERE id = $1::uuid
+        RETURNING *
+      `,
+      [pedido.id, nuevoEstado],
+    );
+
+    await client.query("COMMIT");
+
+    return updatedRows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}

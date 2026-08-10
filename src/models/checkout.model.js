@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { getConfigCheckout } from "../services/configuracion.service.js";
+
 function checkoutError(message, status = 400, code = "VALIDATION") {
   const error = new Error(message);
   error.status = status;
@@ -23,7 +26,9 @@ function normalizeItems(items) {
     const cantidad = Number(item.cantidad);
 
     if (!varianteId || !Number.isInteger(cantidad) || cantidad <= 0) {
-      throw checkoutError("Cada producto requiere variante_id y cantidad mayor a cero.");
+      throw checkoutError(
+        "Cada producto requiere variante_id y cantidad mayor a cero.",
+      );
     }
 
     grouped.set(varianteId, (grouped.get(varianteId) || 0) + cantidad);
@@ -33,6 +38,109 @@ function normalizeItems(items) {
     variante_id,
     cantidad,
   }));
+}
+
+function normalizeOptional(value) {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
+
+function buildCheckoutFingerprint({
+  items,
+  direccion_id,
+  metodo_pago,
+  referencia_externa,
+  cupon_codigo,
+  observaciones,
+}) {
+  const payload = {
+    items,
+    direccion_id: String(direccion_id),
+    metodo_pago: String(metodo_pago).toUpperCase(),
+    referencia_externa: normalizeOptional(referencia_externa),
+    cupon_codigo: normalizeOptional(cupon_codigo)?.toUpperCase() ?? null,
+    observaciones: normalizeOptional(observaciones),
+  };
+
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+async function getCheckoutResultByPedidoId(
+  client,
+  pedidoId,
+  { replayed = false } = {},
+) {
+  const { rows: pedidoRows } = await client.query(
+    `
+      SELECT
+        p.id AS pedido_id,
+        p.folio,
+        p.estado,
+        p.subtotal,
+        p.descuento,
+        p.costo_envio,
+        p.total,
+        pg.metodo::text AS metodo_pago,
+        pg.estado::text AS pago_estado
+      FROM ventas.pedidos p
+      LEFT JOIN LATERAL (
+        SELECT
+          pago.metodo,
+          pago.estado
+        FROM ventas.pagos pago
+        WHERE pago.pedido_id = p.id
+          AND pago.concepto = 'PAGO_TOTAL'
+        ORDER BY pago.fecha_pago DESC, pago.id DESC
+        LIMIT 1
+      ) pg ON TRUE
+      WHERE p.id = $1::uuid
+      LIMIT 1
+    `,
+    [pedidoId],
+  );
+
+  const pedido = pedidoRows[0];
+
+  if (!pedido) {
+    throw checkoutError("Pedido no encontrado.", 404, "ORDER_NOT_FOUND");
+  }
+
+  const { rows: items } = await client.query(
+    `
+      SELECT
+        d.variante_id,
+        d.cantidad,
+        d.precio_unitario,
+        p.nombre AS producto_nombre
+      FROM ventas.detalles_pedido d
+      JOIN inventario.variantes_producto v
+        ON v.id = d.variante_id
+      JOIN inventario.productos p
+        ON p.id = v.producto_id
+      WHERE d.pedido_id = $1::uuid
+      ORDER BY d.variante_id
+    `,
+    [pedidoId],
+  );
+
+  return {
+    pedido_id: pedido.pedido_id,
+    folio: pedido.folio,
+    estado: pedido.estado,
+    subtotal: money(pedido.subtotal),
+    descuento: money(pedido.descuento),
+    costo_envio: money(pedido.costo_envio),
+    total: money(pedido.total),
+    metodo_pago: pedido.metodo_pago,
+    pago_estado: pedido.pago_estado,
+    items: items.map((item) => ({
+      variante_id: item.variante_id,
+      cantidad: Number(item.cantidad),
+      precio_unitario: money(item.precio_unitario),
+      producto_nombre: item.producto_nombre,
+    })),
+    replayed,
+  };
 }
 
 async function getClienteForUpdate(client, usuarioId) {
@@ -73,8 +181,40 @@ async function getMetodoPagoWeb(client, metodo) {
   return rows[0] || null;
 }
 
-async function calcularCupon(client, codigo, subtotal) {
-  if (!codigo) return { cupon_id: null, descuento: 0 };
+async function calcularCupon(
+  client,
+  codigo,
+  subtotal,
+  clienteId,
+  { bloquear = true } = {},
+) {
+  if (!codigo) {
+    return {
+      cupon_id: null,
+      codigo: null,
+      descuento: 0,
+    };
+  }
+
+  const codigoNormalizado = String(codigo).trim().toUpperCase();
+
+  if (!codigoNormalizado) {
+    return {
+      cupon_id: null,
+      codigo: null,
+      descuento: 0,
+    };
+  }
+
+  if (!clienteId) {
+    throw checkoutError(
+      "Se requiere un cliente para aplicar el cupón.",
+      400,
+      "COUPON_CUSTOMER_REQUIRED",
+    );
+  }
+
+  const lockClause = bloquear ? "FOR UPDATE" : "";
 
   const { rows } = await client.query(
     `
@@ -86,51 +226,241 @@ async function calcularCupon(client, codigo, subtotal) {
         monto_minimo_compra,
         fecha_inicio,
         fecha_fin,
-        activo
+        activo,
+        canal,
+        aplica_a,
+        uso_maximo,
+        uso_maximo_por_cliente,
+        solo_clientes_registrados,
+        acumulable,
+        CURRENT_DATE BETWEEN fecha_inicio AND fecha_fin AS vigente
       FROM marketing.cupones
       WHERE UPPER(codigo) = UPPER($1)
       LIMIT 1
+      FOR UPDATE
     `,
-    [String(codigo).trim()],
+    [codigoNormalizado],
   );
 
   const cupon = rows[0];
-  if (!cupon || cupon.activo !== true) {
-    throw checkoutError("El cupón no existe o está inactivo.", 400, "INVALID_COUPON");
+
+  if (!cupon) {
+    throw checkoutError("El cupón no existe.", 400, "INVALID_COUPON");
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-  if (today < String(cupon.fecha_inicio) || today > String(cupon.fecha_fin)) {
-    throw checkoutError("El cupón está fuera de vigencia.", 400, "INVALID_COUPON");
+  if (cupon.activo !== true) {
+    throw checkoutError("El cupón está inactivo.", 400, "INACTIVE_COUPON");
   }
 
-  if (subtotal < Number(cupon.monto_minimo_compra || 0)) {
+  if (cupon.vigente !== true) {
     throw checkoutError(
-      `El cupón requiere una compra mínima de $${Number(cupon.monto_minimo_compra).toFixed(2)}.`,
+      "El cupón está fuera de vigencia.",
       400,
-      "INVALID_COUPON",
+      "EXPIRED_COUPON",
     );
   }
 
-  const tipo = String(cupon.tipo_descuento || "").toUpperCase();
+  const canal = String(cupon.canal || "")
+    .trim()
+    .toUpperCase();
+
+  if (!["WEB", "AMBOS"].includes(canal)) {
+    throw checkoutError(
+      "Este cupón no está disponible para compras en línea.",
+      400,
+      "COUPON_NOT_AVAILABLE_WEB",
+    );
+  }
+
+  const aplicaA = String(cupon.aplica_a || "PEDIDO")
+    .trim()
+    .toUpperCase();
+
+  if (aplicaA !== "PEDIDO") {
+    throw checkoutError(
+      "Este cupón no es compatible actualmente con el checkout.",
+      400,
+      "UNSUPPORTED_COUPON_SCOPE",
+    );
+  }
+
+  if (cupon.solo_clientes_registrados === true && !clienteId) {
+    throw checkoutError(
+      "Este cupón requiere una cuenta registrada.",
+      400,
+      "REGISTERED_CUSTOMER_REQUIRED",
+    );
+  }
+
+  const minimo = money(cupon.monto_minimo_compra || 0);
+
+  if (subtotal < minimo) {
+    throw checkoutError(
+      `El cupón requiere una compra mínima de $${minimo.toFixed(2)}.`,
+      400,
+      "COUPON_MINIMUM_NOT_MET",
+    );
+  }
+
+  const usageResult = await client.query(
+    `
+      SELECT
+        COUNT(*) FILTER (
+          WHERE estado <> 'CANCELADO'
+        )::int AS usos_globales,
+
+        COUNT(*) FILTER (
+          WHERE estado <> 'CANCELADO'
+            AND cliente_id = $2::uuid
+        )::int AS usos_cliente
+
+      FROM ventas.pedidos
+      WHERE cupon_id = $1
+    `,
+    [cupon.id, clienteId],
+  );
+
+  const usosGlobales = Number(usageResult.rows[0]?.usos_globales || 0);
+
+  const usosCliente = Number(usageResult.rows[0]?.usos_cliente || 0);
+
+  const usoMaximo = cupon.uso_maximo === null ? null : Number(cupon.uso_maximo);
+
+  if (usoMaximo !== null && usosGlobales >= usoMaximo) {
+    throw checkoutError(
+      "Este cupón alcanzó su límite máximo de usos.",
+      409,
+      "COUPON_GLOBAL_LIMIT_REACHED",
+    );
+  }
+
+  const usoMaximoPorCliente =
+    cupon.uso_maximo_por_cliente === null
+      ? null
+      : Number(cupon.uso_maximo_por_cliente);
+
+  if (usoMaximoPorCliente !== null && usosCliente >= usoMaximoPorCliente) {
+    throw checkoutError(
+      usoMaximoPorCliente === 1
+        ? "Ya utilizaste este cupón."
+        : `Ya alcanzaste el límite de ${usoMaximoPorCliente} usos para este cupón.`,
+      409,
+      "COUPON_CUSTOMER_LIMIT_REACHED",
+    );
+  }
+
+  const tipo = String(cupon.tipo_descuento || "")
+    .trim()
+    .toUpperCase();
+
+  const valor = Number(cupon.valor || 0);
+
+  if (!Number.isFinite(valor) || valor <= 0) {
+    throw checkoutError(
+      "El cupón tiene un valor de descuento inválido.",
+      400,
+      "INVALID_COUPON_VALUE",
+    );
+  }
+
   let descuento = 0;
 
   if (["PORCENTAJE", "PERCENT", "PORCENTUAL"].includes(tipo)) {
-    descuento = subtotal * (Number(cupon.valor || 0) / 100);
+    if (valor > 100) {
+      throw checkoutError(
+        "El porcentaje del cupón no puede ser mayor a 100%.",
+        400,
+        "INVALID_COUPON_VALUE",
+      );
+    }
+
+    descuento = subtotal * (valor / 100);
   } else if (["MONTO_FIJO", "FIJO", "MONTO"].includes(tipo)) {
-    descuento = Number(cupon.valor || 0);
+    descuento = valor;
   } else {
     throw checkoutError(
-      "El tipo de descuento del cupón todavía no es compatible con checkout.",
+      "El tipo de descuento del cupón no es compatible con checkout.",
       400,
       "UNSUPPORTED_COUPON",
     );
   }
 
+  descuento = Math.min(money(descuento), subtotal);
+
   return {
     cupon_id: cupon.id,
-    descuento: Math.min(money(descuento), subtotal),
+    codigo: cupon.codigo,
+    descuento,
+
+    uso_maximo: usoMaximo,
+    uso_maximo_por_cliente: usoMaximoPorCliente,
+
+    usos_globales: usosGlobales,
+    usos_cliente: usosCliente,
+
+    usos_globales_restantes:
+      usoMaximo === null ? null : Math.max(usoMaximo - usosGlobales - 1, 0),
+
+    usos_cliente_restantes:
+      usoMaximoPorCliente === null
+        ? null
+        : Math.max(usoMaximoPorCliente - usosCliente - 1, 0),
   };
+}
+
+function calcularCostoEnvio({ tipoEntrega, subtotal, descuento, config }) {
+  if (!config.habilitado) {
+    throw checkoutError(
+      "El checkout se encuentra temporalmente deshabilitado.",
+      409,
+      "CHECKOUT_DISABLED",
+    );
+  }
+
+  const subtotalNeto = money(Math.max(Number(subtotal) - Number(descuento), 0));
+
+  if (tipoEntrega === "RECOGER") {
+    if (!config.permitirRecoleccionTienda) {
+      throw checkoutError(
+        "La recolección en tienda no está disponible.",
+        409,
+        "PICKUP_DISABLED",
+      );
+    }
+
+    return {
+      costoEnvio: 0,
+      envioGratis: true,
+      subtotalNeto,
+    };
+  }
+
+  if (tipoEntrega === "DOMICILIO") {
+    if (!config.permitirEnvioDomicilio) {
+      throw checkoutError(
+        "El envío a domicilio no está disponible.",
+        409,
+        "DELIVERY_DISABLED",
+      );
+    }
+
+    const envioGratis =
+      config.envioGratisHabilitado === true &&
+      subtotalNeto >= config.envioGratisDesde;
+
+    return {
+      costoEnvio: envioGratis ? 0 : money(config.costoEnvioDomicilio),
+
+      envioGratis,
+      subtotalNeto,
+    };
+  }
+
+  throw checkoutError(
+    "Tipo de entrega inválido.",
+    400,
+    "INVALID_DELIVERY_TYPE",
+  );
 }
 
 export async function crearPedidoWeb(
@@ -138,26 +468,67 @@ export async function crearPedidoWeb(
   usuarioId,
   {
     items,
+    tipo_entrega,
     direccion_id,
     metodo_pago,
     referencia_externa = null,
     cupon_codigo = null,
     observaciones = null,
+    idempotency_key,
   },
 ) {
-  const normalizedItems = normalizeItems(items);
-  const metodo = String(metodo_pago || "").trim().toUpperCase();
+  const normalizedItems = normalizeItems(items).sort((a, b) =>
+    a.variante_id.localeCompare(b.variante_id),
+  );
 
-  if (!direccion_id) throw checkoutError("direccion_id es requerido.");
+  const metodo = String(metodo_pago || "")
+    .trim()
+    .toUpperCase();
+
+  const idempotencyKey = String(idempotency_key || "").trim();
+
+  if (!idempotencyKey) {
+    throw checkoutError(
+      "Idempotency-Key es requerido.",
+      400,
+      "IDEMPOTENCY_KEY_REQUIRED",
+    );
+  }
+
+  const tipoEntrega = String(tipo_entrega || "RECOGER")
+    .trim()
+    .toUpperCase();
+
+  if (!["RECOGER", "DOMICILIO"].includes(tipoEntrega)) {
+    throw checkoutError("Tipo de entrega inválido.");
+  }
+
+  if (tipoEntrega === "DOMICILIO" && !direccion_id) {
+    throw checkoutError("direccion_id es requerido para entrega a domicilio.");
+  }
+
   if (!metodo) throw checkoutError("metodo_pago es requerido.");
+
+  const fingerprint = buildCheckoutFingerprint({
+    items: normalizedItems,
+    tipo_entrega: tipoEntrega,
+    direccion_id: tipoEntrega == "DOMICILIO" ? direccion_id : null,
+    metodo_pago: metodo,
+    referencia_externa,
+    cupon_codigo,
+    observaciones,
+  });
 
   const client = await db.connect();
 
   try {
     await client.query("BEGIN");
-    await client.query("SELECT set_config('app.user_id', $1, true)", [usuarioId]);
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuarioId,
+    ]);
 
     const cliente = await getClienteForUpdate(client, usuarioId);
+
     if (!cliente) {
       throw checkoutError(
         "La cuenta no tiene un perfil de cliente activo.",
@@ -166,24 +537,80 @@ export async function crearPedidoWeb(
       );
     }
 
-    const addressResult = await client.query(
+    await client.query(
       `
-        SELECT *
-        FROM clientes.direcciones
-        WHERE id = $1::uuid AND cliente_id = $2::uuid
-        LIMIT 1
+        SELECT pg_advisory_xact_lock(
+          hashtextextended($1, 0)
+        )
       `,
-      [direccion_id, cliente.id],
+      [`checkout:${cliente.id}:${idempotencyKey}`],
     );
 
-    const direccion = addressResult.rows[0];
-    if (!direccion) {
-      throw checkoutError("La dirección no pertenece a la cuenta.", 404, "ADDRESS_NOT_FOUND");
+    const existingResult = await client.query(
+      `
+        SELECT
+          id,
+          idempotency_hash
+        FROM ventas.pedidos
+        WHERE cliente_id = $1::uuid
+          AND idempotency_key = $2
+        LIMIT 1
+      `,
+      [cliente.id, idempotencyKey],
+    );
+
+    const existing = existingResult.rows[0];
+
+    if (existing) {
+      if (existing.idempotency_hash !== fingerprint) {
+        throw checkoutError(
+          "La misma llave de idempotencia fue utilizada con datos diferentes.",
+          409,
+          "IDEMPOTENCY_CONFLICT",
+        );
+      }
+
+      const previousResult = await getCheckoutResultByPedidoId(
+        client,
+        existing.id,
+        { replayed: true },
+      );
+
+      await client.query("COMMIT");
+
+      return previousResult;
+    }
+
+    let direccion = null;
+
+    if (tipoEntrega === "DOMICILIO") {
+      const addressResult = await client.query(
+        `
+          SELECT *
+          FROM clientes.direcciones
+          WHERE id = $1::uuid
+            AND cliente_id = $2::uuid
+          LIMIT 1
+        `,
+        [direccion_id, cliente.id],
+      );
+
+      direccion = addressResult.rows[0];
+
+      if (!direccion) {
+        throw checkoutError(
+          "La dirección no pertenece a la cuenta.",
+          404,
+          "ADDRESS_NOT_FOUND",
+        );
+      }
     }
 
     const paymentConfig = await getMetodoPagoWeb(client, metodo);
     if (!paymentConfig || paymentConfig.activo_web !== true) {
-      throw checkoutError("El método de pago no está disponible en la tienda web.");
+      throw checkoutError(
+        "El método de pago no está disponible en la tienda web.",
+      );
     }
 
     if (
@@ -224,12 +651,18 @@ export async function crearPedidoWeb(
         );
       }
 
-      if (variante.variante_activa !== true || variante.producto_activo !== true) {
-        throw checkoutError(`${variante.producto_nombre} ya no está disponible.`);
+      if (
+        variante.variante_activa !== true ||
+        variante.producto_activo !== true
+      ) {
+        throw checkoutError(
+          `${variante.producto_nombre} ya no está disponible.`,
+        );
       }
 
       const disponible =
-        Number(variante.stock_fisico || 0) - Number(variante.stock_apartado || 0);
+        Number(variante.stock_fisico || 0) -
+        Number(variante.stock_apartado || 0);
 
       if (disponible < item.cantidad) {
         throw checkoutError(
@@ -241,7 +674,9 @@ export async function crearPedidoWeb(
 
       const precio = money(variante.precio_venta);
       if (precio <= 0) {
-        throw checkoutError(`${variante.producto_nombre} no tiene un precio válido.`);
+        throw checkoutError(
+          `${variante.producto_nombre} no tiene un precio válido.`,
+        );
       }
 
       orderItems.push({
@@ -258,11 +693,27 @@ export async function crearPedidoWeb(
       ),
     );
 
-    const coupon = await calcularCupon(client, cupon_codigo, subtotal);
-    const costoEnvio = 0;
+    const coupon = await calcularCupon(
+      client,
+      cupon_codigo,
+      subtotal,
+      cliente.id,
+    );
+    const checkoutConfig = await getConfigCheckout(client);
+
+    const envio = calcularCostoEnvio({
+      tipoEntrega,
+      subtotal,
+      descuento: coupon.descuento,
+      config: checkoutConfig,
+    });
+
+    const costoEnvio = envio.costoEnvio;
+
     const total = money(subtotal - coupon.descuento + costoEnvio);
 
-    const esCredito = paymentConfig.es_credito === true || metodo === "CREDITO_TIENDA";
+    const esCredito =
+      paymentConfig.es_credito === true || metodo === "CREDITO_TIENDA";
 
     if (esCredito) {
       if (cliente.tiene_credito !== true) {
@@ -282,6 +733,7 @@ export async function crearPedidoWeb(
       }
     }
 
+    const costoEnvioConfirmado = true;
     const pedidoResult = await client.query(
       `
         INSERT INTO ventas.pedidos (
@@ -294,9 +746,14 @@ export async function crearPedidoWeb(
           costo_envio,
           total,
           cupon_id,
-          observaciones
+          observaciones,
+          tipo_entrega,
+          costo_envio_confirmado,
+          metodo_pago_solicitado,
+          idempotency_key,
+          idempotency_hash
         )
-        VALUES ($1, NULL, 'WEB', 'PENDIENTE', $2, $3, $4, $5, $6, $7)
+        VALUES ($1, NULL, 'WEB', 'PENDIENTE', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING *
       `,
       [
@@ -307,13 +764,19 @@ export async function crearPedidoWeb(
         total,
         coupon.cupon_id,
         observaciones ? String(observaciones).trim() : null,
+        tipoEntrega,
+        costoEnvioConfirmado,
+        metodo,
+        idempotencyKey,
+        fingerprint,
       ],
     );
 
     const pedido = pedidoResult.rows[0];
 
-    await client.query(
-      `
+    if (tipoEntrega == "DOMICILIO") {
+      await client.query(
+        `
         INSERT INTO ventas.direcciones_pedido (
           pedido_id,
           nombre_destinatario,
@@ -329,20 +792,21 @@ export async function crearPedidoWeb(
         )
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       `,
-      [
-        pedido.id,
-        cliente.nombre_completo,
-        cliente.telefono,
-        direccion.calle,
-        direccion.numero_exterior,
-        direccion.numero_interior,
-        direccion.colonia,
-        direccion.ciudad,
-        direccion.estado,
-        direccion.codigo_postal,
-        direccion.referencias,
-      ],
-    );
+        [
+          pedido.id,
+          cliente.nombre_completo,
+          cliente.telefono,
+          direccion.calle,
+          direccion.numero_exterior,
+          direccion.numero_interior,
+          direccion.colonia,
+          direccion.ciudad,
+          direccion.estado,
+          direccion.codigo_postal,
+          direccion.referencias,
+        ],
+      );
+    }
 
     for (const item of orderItems) {
       await client.query(
@@ -494,4 +958,512 @@ export async function crearPedidoWeb(
   } finally {
     client.release();
   }
+}
+
+export async function confirmarPedidoWeb(
+  db,
+  pedidoId,
+  usuarioId,
+  { referencia_externa = null } = {},
+) {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuarioId,
+    ]);
+
+    const { rows: pedidoRows } = await client.query(
+      `
+        SELECT
+          id,
+          folio,
+          tipo,
+          estado,
+          total
+        FROM ventas.pedidos
+        WHERE id = $1::uuid
+        FOR UPDATE
+      `,
+      [pedidoId],
+    );
+
+    const pedido = pedidoRows[0];
+
+    if (!pedido) {
+      throw checkoutError("Pedido no encontrado.", 404, "ORDER_NOT_FOUND");
+    }
+
+    if (pedido.tipo !== "WEB") {
+      throw checkoutError(
+        "El pedido no es un pedido WEB.",
+        400,
+        "INVALID_ORDER_TYPE",
+      );
+    }
+
+    // Idempotencia de la operación.
+    if (pedido.estado === "PAGADO") {
+      const result = await getCheckoutResultByPedidoId(client, pedido.id);
+
+      await client.query("COMMIT");
+      return result;
+    }
+
+    if (pedido.estado !== "PENDIENTE") {
+      throw checkoutError(
+        `No se puede confirmar un pedido en estado ${pedido.estado}.`,
+        409,
+        "INVALID_ORDER_STATE",
+      );
+    }
+
+    const { rows: pagoRows } = await client.query(
+      `
+        SELECT
+          id,
+          estado,
+          monto,
+          metodo
+        FROM ventas.pagos
+        WHERE pedido_id = $1::uuid
+          AND concepto = 'PAGO_TOTAL'
+        ORDER BY fecha_pago DESC, id DESC
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [pedido.id],
+    );
+
+    const pago = pagoRows[0];
+
+    if (!pago) {
+      throw checkoutError(
+        "El pedido no tiene un pago registrado.",
+        409,
+        "PAYMENT_NOT_FOUND",
+      );
+    }
+
+    if (pago.estado === "CANCELADO" || pago.estado === "RECHAZADO") {
+      throw checkoutError(
+        `El pago está ${pago.estado}.`,
+        409,
+        "INVALID_PAYMENT_STATE",
+      );
+    }
+
+    const { rows: detalles } = await client.query(
+      `
+        SELECT
+          variante_id,
+          cantidad
+        FROM ventas.detalles_pedido
+        WHERE pedido_id = $1::uuid
+        ORDER BY variante_id
+      `,
+      [pedido.id],
+    );
+
+    if (!detalles.length) {
+      throw checkoutError(
+        "El pedido no contiene productos.",
+        409,
+        "ORDER_WITHOUT_ITEMS",
+      );
+    }
+
+    const varianteIds = detalles.map((detalle) => detalle.variante_id);
+
+    const { rows: variantes } = await client.query(
+      `
+        SELECT
+          id,
+          stock_fisico,
+          stock_apartado
+        FROM inventario.variantes_producto
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id
+        FOR UPDATE
+      `,
+      [varianteIds],
+    );
+
+    const variantesMap = new Map(
+      variantes.map((variante) => [variante.id, variante]),
+    );
+
+    if (variantes.length !== detalles.length) {
+      throw checkoutError(
+        "Una o más variantes del pedido ya no existen.",
+        409,
+        "VARIANT_NOT_FOUND",
+      );
+    }
+
+    for (const detalle of detalles) {
+      const variante = variantesMap.get(detalle.variante_id);
+
+      const cantidad = Number(detalle.cantidad);
+      const stockFisico = Number(variante.stock_fisico);
+      const stockApartado = Number(variante.stock_apartado);
+
+      if (stockApartado < cantidad) {
+        throw checkoutError(
+          `La reserva de la variante ${detalle.variante_id} es inconsistente.`,
+          409,
+          "RESERVATION_INCONSISTENT",
+        );
+      }
+
+      if (stockFisico < cantidad) {
+        throw checkoutError(
+          `Stock físico insuficiente para la variante ${detalle.variante_id}.`,
+          409,
+          "STOCK",
+        );
+      }
+    }
+
+    for (const detalle of detalles) {
+      const cantidad = Number(detalle.cantidad);
+
+      const stockResult = await client.query(
+        `
+          UPDATE inventario.variantes_producto
+          SET
+            stock_fisico = stock_fisico - $2,
+            stock_apartado = stock_apartado - $2,
+            updated_at = now()
+          WHERE id = $1::uuid
+            AND stock_fisico >= $2
+            AND stock_apartado >= $2
+          RETURNING id
+        `,
+        [detalle.variante_id, cantidad],
+      );
+
+      if (!stockResult.rows.length) {
+        throw checkoutError(
+          `No se pudo consumir la reserva de ${detalle.variante_id}.`,
+          409,
+          "STOCK",
+        );
+      }
+
+      await client.query(
+        `
+          INSERT INTO inventario.movimientos (
+            variante_id,
+            usuario_id,
+            cantidad,
+            motivo,
+            tipo
+          )
+          VALUES ($1,$2,$3,$4,'SALIDA')
+        `,
+        [
+          detalle.variante_id,
+          usuarioId,
+          -Math.abs(cantidad),
+          `CONFIRMACIÓN PEDIDO WEB ${pedido.folio}`,
+        ],
+      );
+    }
+
+    await client.query(
+      `
+        UPDATE ventas.pagos
+        SET
+          estado = 'CONFIRMADO',
+          usuario_id = $2,
+          referencia_externa =
+            COALESCE($3, referencia_externa),
+          fecha_pago = now()
+        WHERE id = $1::uuid
+      `,
+      [pago.id, usuarioId, normalizeOptional(referencia_externa)],
+    );
+
+    await client.query(
+      `
+        UPDATE ventas.pedidos
+        SET
+          estado = 'PAGADO',
+          liquidado_at = now()
+        WHERE id = $1::uuid
+      `,
+      [pedido.id],
+    );
+
+    await client.query("COMMIT");
+
+    return await getCheckoutResultByPedidoId(client, pedido.id);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function cancelarPedidoWeb(
+  db,
+  pedidoId,
+  usuarioId,
+  { motivo } = {},
+) {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuarioId,
+    ]);
+
+    const { rows: pedidoRows } = await client.query(
+      `
+        SELECT
+          id,
+          folio,
+          tipo,
+          estado
+        FROM ventas.pedidos
+        WHERE id = $1::uuid
+        FOR UPDATE
+      `,
+      [pedidoId],
+    );
+
+    const pedido = pedidoRows[0];
+
+    if (!pedido) {
+      throw checkoutError("Pedido no encontrado.", 404, "ORDER_NOT_FOUND");
+    }
+
+    if (pedido.tipo !== "WEB") {
+      throw checkoutError(
+        "El pedido no es un pedido WEB.",
+        400,
+        "INVALID_ORDER_TYPE",
+      );
+    }
+
+    if (pedido.estado === "CANCELADO") {
+      const result = await getCheckoutResultByPedidoId(client, pedido.id);
+
+      await client.query("COMMIT");
+      return result;
+    }
+
+    if (pedido.estado !== "PENDIENTE") {
+      throw checkoutError(
+        `No se puede cancelar una reserva WEB en estado ${pedido.estado}.`,
+        409,
+        "INVALID_ORDER_STATE",
+      );
+    }
+
+    const { rows: detalles } = await client.query(
+      `
+        SELECT
+          variante_id,
+          cantidad
+        FROM ventas.detalles_pedido
+        WHERE pedido_id = $1::uuid
+        ORDER BY variante_id
+      `,
+      [pedido.id],
+    );
+
+    const varianteIds = detalles.map((detalle) => detalle.variante_id);
+
+    if (varianteIds.length) {
+      const { rows: variantes } = await client.query(
+        `
+          SELECT
+            id,
+            stock_apartado
+          FROM inventario.variantes_producto
+          WHERE id = ANY($1::uuid[])
+          ORDER BY id
+          FOR UPDATE
+        `,
+        [varianteIds],
+      );
+
+      const variantesMap = new Map(
+        variantes.map((variante) => [variante.id, variante]),
+      );
+
+      if (variantes.length !== detalles.length) {
+        throw checkoutError(
+          "Una o más variantes de la reserva ya no existen.",
+          409,
+          "VARIANT_NOT_FOUND",
+        );
+      }
+
+      for (const detalle of detalles) {
+        const variante = variantesMap.get(detalle.variante_id);
+
+        if (Number(variante.stock_apartado) < Number(detalle.cantidad)) {
+          throw checkoutError(
+            `La reserva de ${detalle.variante_id} es inconsistente.`,
+            409,
+            "RESERVATION_INCONSISTENT",
+          );
+        }
+      }
+
+      for (const detalle of detalles) {
+        const stockResult = await client.query(
+          `
+            UPDATE inventario.variantes_producto
+            SET
+              stock_apartado =
+                stock_apartado - $2,
+              updated_at = now()
+            WHERE id = $1::uuid
+              AND stock_apartado >= $2
+            RETURNING id
+          `,
+          [detalle.variante_id, Number(detalle.cantidad)],
+        );
+
+        if (!stockResult.rows.length) {
+          throw checkoutError(
+            `No se pudo liberar la reserva ${detalle.variante_id}.`,
+            409,
+            "RESERVATION_INCONSISTENT",
+          );
+        }
+      }
+    }
+
+    await client.query(
+      `
+        UPDATE ventas.pagos
+        SET
+          estado = 'CANCELADO',
+          usuario_id = COALESCE(usuario_id, $2)
+        WHERE pedido_id = $1::uuid
+          AND estado = 'PENDIENTE'
+      `,
+      [pedido.id, usuarioId],
+    );
+
+    await client.query(
+      `
+        UPDATE ventas.pedidos
+        SET
+          estado = 'CANCELADO',
+          motivo_cancelacion = $2,
+          fecha_cancelacion = now()
+        WHERE id = $1::uuid
+      `,
+      [pedido.id, normalizeOptional(motivo) ?? "Pedido web cancelado"],
+    );
+
+    await client.query("COMMIT");
+
+    return await getCheckoutResultByPedidoId(client, pedido.id);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function validarCuponCheckout(db, usuarioId, { codigo, items }) {
+  const normalizedItems = normalizeItems(items);
+
+  const { rows: clienteRows } = await db.query(
+    `
+      SELECT id
+      FROM clientes.clientes
+      WHERE usuario_id = $1::uuid
+        AND activo = true
+      LIMIT 1
+    `,
+    [usuarioId],
+  );
+
+  const cliente = clienteRows[0];
+
+  if (!cliente) {
+    throw checkoutError(
+      "No se encontró el perfil del cliente.",
+      404,
+      "CLIENT_PROFILE_NOT_FOUND",
+    );
+  }
+
+  let subtotal = 0;
+
+  for (const item of normalizedItems) {
+    const { rows } = await db.query(
+      `
+        SELECT
+          v.precio_venta,
+          v.activo AS variante_activa,
+          p.activo AS producto_activo
+        FROM inventario.variantes_producto v
+        JOIN inventario.productos p
+          ON p.id = v.producto_id
+        WHERE v.id = $1::uuid
+        LIMIT 1
+      `,
+      [item.variante_id],
+    );
+
+    const variante = rows[0];
+
+    if (!variante) {
+      throw checkoutError(
+        "Uno de los productos ya no existe.",
+        404,
+        "VARIANT_NOT_FOUND",
+      );
+    }
+
+    if (
+      variante.variante_activa !== true ||
+      variante.producto_activo !== true
+    ) {
+      throw checkoutError(
+        "Uno de los productos ya no está disponible.",
+        409,
+        "PRODUCT_UNAVAILABLE",
+      );
+    }
+
+    subtotal += Number(variante.precio_venta) * item.cantidad;
+  }
+
+  subtotal = money(subtotal);
+
+  const cupon = await calcularCupon(db, codigo, subtotal, cliente.id, {
+    bloquear: false,
+  });
+
+  const total = money(subtotal - cupon.descuento);
+
+  return {
+    codigo: cupon.codigo,
+    subtotal,
+    descuento: cupon.descuento,
+    total,
+
+    uso_maximo: cupon.uso_maximo,
+    uso_maximo_por_cliente: cupon.uso_maximo_por_cliente,
+
+    usos_globales_restantes: cupon.usos_globales_restantes,
+
+    usos_cliente_restantes: cupon.usos_cliente_restantes,
+  };
 }

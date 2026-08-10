@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { body, validationResult } from "express-validator";
+import { body, header, param, validationResult } from "express-validator";
 import rateLimit from "express-rate-limit";
 import { useInternalDb } from "../middleware/dbContext.js";
-import { requireAuth } from "../middleware/seguridad.js";
-import { postPedidoWeb } from "../controllers/checkout.controller.js";
+import { requireAuth, requireRole } from "../middleware/seguridad.js";
+import { postPedidoWeb, postConfirmarPedidoWeb, postCancelarPedidoWeb, postValidarCuponCheckout } from "../controllers/checkout.controller.js";
 
 const router = Router();
 
@@ -32,17 +32,77 @@ router.use(useInternalDb, requireAuth);
 router.post(
   "/pedidos",
   checkoutLimiter,
+  header("Idempotency-Key")
+    .exists({ checkFalsy: true })
+    .withMessage("Idempotency-Key es requerido.")
+    .bail()
+    .isUUID()
+    .withMessage("Idempotency-Key debe ser un UUID."),
   body("items").isArray({ min: 1, max: 50 }),
   body("items.*.variante_id").optional().isUUID(),
   body("items.*.varianteId").optional().isUUID(),
   body("items.*.cantidad").isInt({ min: 1, max: 100 }),
-  body("direccion_id").isUUID(),
+  body("tipo_entrega").isIn(["RECOGER", "DOMICILIO"]),
+  body("direccion_id").optional({ nullable: true }).isUUID(),
   body("metodo_pago").isString().isLength({ min: 3, max: 40 }),
   body("referencia_externa").optional({ nullable: true }).isLength({ max: 150 }),
   body("cupon_codigo").optional({ nullable: true }).isLength({ max: 30 }),
   body("observaciones").optional({ nullable: true }).isLength({ max: 500 }),
   validar,
   postPedidoWeb,
+);
+
+router.post(
+  "/pedidos/:id/confirmar",
+  requireRole("ADMIN", "EMPLEADO"),
+
+  param("id").isUUID(),
+
+  body("referencia_externa")
+    .optional({ nullable: true })
+    .isString()
+    .isLength({ max: 150 }),
+
+  validar,
+  postConfirmarPedidoWeb,
+);
+
+router.post(
+  "/pedidos/:id/cancelar",
+  requireRole("ADMIN", "EMPLEADO"),
+
+  param("id").isUUID(),
+
+  body("motivo")
+    .optional({ nullable: true })
+    .isString()
+    .isLength({ max: 500 }),
+
+  validar,
+  postCancelarPedidoWeb,
+);
+
+router.post(
+  "/cupon/validar",
+  requireAuth,
+
+  body("codigo")
+    .isString()
+    .trim()
+    .isLength({ min: 3, max: 80 }),
+
+  body("items")
+    .isArray({ min: 1 }),
+
+  body("items.*.variante_id")
+    .isUUID(),
+
+  body("items.*.cantidad")
+    .isInt({ min: 1 }),
+
+  validar,
+
+  postValidarCuponCheckout,
 );
 
 export default router;

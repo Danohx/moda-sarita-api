@@ -154,3 +154,35 @@ export async function getConfigPOS(db) {
     metodoPagoDefault: map["pos.metodo_pago_default"] ?? "EFECTIVO",
   };
 }
+
+export async function getConfigCheckout(db) {
+  const [
+    habilitado,
+    permitirRecoleccionTienda,
+    permitirEnvioDomicilio,
+    costoEnvioDomicilio,
+    envioGratisHabilitado,
+    envioGratisDesde,
+  ] = await Promise.all([
+    getParametroBool(db, "checkout.habilitado", false),
+
+    getParametroBool(db, "checkout.permitir_recoleccion_tienda", true),
+
+    getParametroBool(db, "checkout.permitir_envio_domicilio", false),
+
+    getParametroNumber(db, "checkout.costo_envio_domicilio", 0),
+
+    getParametroBool(db, "checkout.envio_gratis_habilitado", false),
+
+    getParametroNumber(db, "checkout.envio_gratis_desde", 0),
+  ]);
+
+  return {
+    habilitado,
+    permitirRecoleccionTienda,
+    permitirEnvioDomicilio,
+    costoEnvioDomicilio: Math.max(0, Number(costoEnvioDomicilio)),
+    envioGratisHabilitado,
+    envioGratisDesde: Math.max(0, Number(envioGratisDesde)),
+  };
+}

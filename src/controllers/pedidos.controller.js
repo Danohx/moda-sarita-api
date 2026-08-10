@@ -6,12 +6,13 @@ import {
   liquidarApartado,
   vencerApartadosExpirados,
   getPagoTicketData,
+  cambiarEstadoPedidoWeb,
 } from "../models/pedidos.model.js";
 import {
   generarTicketPedidoPdfStream,
   generarTicketPagoPdfStream,
 } from "../utils/pdf/ticketPedido.pdf.js";
-import { getConfigTicket } from "../services/configuracion.service.js"
+import { getConfigTicket } from "../services/configuracion.service.js";
 
 const METODOS_PAGO_VALIDOS = new Set([
   "EFECTIVO",
@@ -528,6 +529,52 @@ export async function getPagoTicketPdf(req, res) {
       ok: false,
       message: "Error generando ticket de pago",
       detail: err.message,
+    });
+  }
+}
+
+export async function patchEstadoPedidoWeb(req, res) {
+  try {
+    const pedidoId = String(req.params.id || "").trim();
+    const estado = String(req.body?.estado || "")
+      .trim()
+      .toUpperCase();
+
+    if (!["ENVIADO", "ENTREGADO"].includes(estado)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Estado no permitido.",
+      });
+    }
+
+    const data = await cambiarEstadoPedidoWeb(req.db, pedidoId, estado);
+
+    return res.json({
+      ok: true,
+      message: `Pedido actualizado a ${estado}.`,
+      data,
+    });
+  } catch (error) {
+    console.error("patchEstadoPedidoWeb error:", error);
+
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({
+        ok: false,
+        message: error.message,
+      });
+    }
+
+    if (error.code === "VALIDATION" || error.code === "INVALID_STATE") {
+      return res.status(409).json({
+        ok: false,
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: "No se pudo actualizar el pedido.",
+      detail: error.message,
     });
   }
 }

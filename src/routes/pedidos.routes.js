@@ -11,6 +11,7 @@ import {
   postVencerApartadosExpirados,
   getPedidoTicketPdf,
   getPagoTicketPdf,
+  patchEstadoPedidoWeb,
 } from "../controllers/pedidos.controller.js";
 import {
   postCancelarPedidoWeb,
@@ -60,5 +61,6 @@ router.get("/:id/pagos/:pagoId/ticket", getPagoTicketPdf);
 router.post("/:id/abonos", postAbonoApartado);
 router.post("/:id/cancelar", postCancelarApartado);
 router.post("/:id/liquidar", postLiquidarApartado);
+router.patch("/:id/estado-web", patchEstadoPedidoWeb);
 
 export default router;
