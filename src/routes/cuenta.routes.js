@@ -5,11 +5,18 @@ import { requireAuth } from "../middleware/seguridad.js";
 import {
   deleteMiDireccion,
   getMiCredito,
+  getMiCreditoDetalle,
+  getMisCuotasCredito,
+  getMisPagosCredito,
+  getMisMovimientosCreditoDetalle,
+  getMisPagosPedido,
   getMiCuenta,
+  getMiResumenPortal,
   getMiPedido,
   getMisApartados,
   getMisDirecciones,
   getMisMovimientosCredito,
+  getMisCreditos,
   getMisPedidos,
   patchMiDireccion,
   patchMiDireccionPrincipal,
@@ -53,6 +60,7 @@ const direccionValidators = [
 router.use(useInternalDb, requireAuth);
 
 router.get("/", getMiCuenta);
+router.get("/resumen", getMiResumenPortal);
 router.patch(
   "/perfil",
   nombreValidator("nombres"),
@@ -102,6 +110,45 @@ router.delete(
 
 router.get("/credito", getMiCredito);
 router.get(
+  "/credito/creditos",
+  query("estado").optional().isString().isLength({ max: 30 }),
+  query("limit").optional().isInt({ min: 1, max: 100 }),
+  query("offset").optional().isInt({ min: 0 }),
+  validar,
+  getMisCreditos,
+);
+router.get(
+  "/credito/creditos/:creditoId",
+  param("creditoId").isUUID(),
+  validar,
+  getMiCreditoDetalle,
+);
+router.get(
+  "/credito/creditos/:creditoId/cuotas",
+  param("creditoId").isUUID(),
+  query("limit").optional().isInt({ min: 1, max: 100 }),
+  query("offset").optional().isInt({ min: 0 }),
+  validar,
+  getMisCuotasCredito,
+);
+router.get(
+  "/credito/creditos/:creditoId/pagos",
+  param("creditoId").isUUID(),
+  query("limit").optional().isInt({ min: 1, max: 100 }),
+  query("offset").optional().isInt({ min: 0 }),
+  validar,
+  getMisPagosCredito,
+);
+router.get(
+  "/credito/creditos/:creditoId/movimientos",
+  param("creditoId").isUUID(),
+  query("limit").optional().isInt({ min: 1, max: 100 }),
+  query("offset").optional().isInt({ min: 0 }),
+  validar,
+  getMisMovimientosCreditoDetalle,
+);
+
+router.get(
   "/credito/movimientos",
   query("limit").optional().isInt({ min: 1, max: 100 }),
   query("offset").optional().isInt({ min: 0 }),
@@ -124,6 +171,14 @@ router.get(
   query("offset").optional().isInt({ min: 0 }),
   validar,
   getMisApartados,
+);
+router.get(
+  "/pedidos/:pedidoId/pagos",
+  param("pedidoId").isUUID(),
+  query("limit").optional().isInt({ min: 1, max: 100 }),
+  query("offset").optional().isInt({ min: 0 }),
+  validar,
+  getMisPagosPedido,
 );
 router.get(
   "/pedidos/:pedidoId",

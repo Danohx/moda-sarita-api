@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { body, header, param, validationResult } from "express-validator";
+import { body, header, param, query, validationResult } from "express-validator";
 import rateLimit from "express-rate-limit";
 import { useInternalDb } from "../middleware/dbContext.js";
 import { requireAuth, requireRole } from "../middleware/seguridad.js";
-import { postPedidoWeb, postConfirmarPedidoWeb, postCancelarPedidoWeb, postValidarCuponCheckout } from "../controllers/checkout.controller.js";
+import { postPedidoWeb, postConfirmarPedidoWeb, postCancelarPedidoWeb, postValidarCuponCheckout, getOpcionesCreditoWeb } from "../controllers/checkout.controller.js";
 
 const router = Router();
 
@@ -29,6 +29,13 @@ function validar(req, res, next) {
 
 router.use(useInternalDb, requireAuth);
 
+router.get(
+  "/credito/opciones",
+  query("total").isFloat({ gt: 0 }),
+  validar,
+  getOpcionesCreditoWeb,
+);
+
 router.post(
   "/pedidos",
   checkoutLimiter,
@@ -45,6 +52,9 @@ router.post(
   body("tipo_entrega").isIn(["RECOGER", "DOMICILIO"]),
   body("direccion_id").optional({ nullable: true }).isUUID(),
   body("metodo_pago").isString().isLength({ min: 3, max: 40 }),
+  body("credito").optional({ nullable: true }).isObject(),
+  body("credito.plazo_meses").optional().isInt({ min: 1, max: 60 }),
+  body("credito.frecuencia_pago").optional().isIn(["SEMANAL", "QUINCENAL", "MENSUAL"]),
   body("referencia_externa").optional({ nullable: true }).isLength({ max: 150 }),
   body("cupon_codigo").optional({ nullable: true }).isLength({ max: 30 }),
   body("observaciones").optional({ nullable: true }).isLength({ max: 500 }),

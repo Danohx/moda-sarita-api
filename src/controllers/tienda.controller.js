@@ -128,12 +128,11 @@ export async function getPedidoById(req, res) {
 }
 
 export async function postPedido(req, res) {
-  try {
-    const data = await createPedidoWeb(req.db, req.user.id, req.body || {});
-    return res.status(201).json({ ok: true, msg: "Pedido creado correctamente", data });
-  } catch (error) {
-    return handleError(res, error, "Error creando el pedido web");
-  }
+  return res.status(410).json({
+    ok: false,
+    code: "LEGACY_CHECKOUT_DISABLED",
+    msg: "La creación de pedidos se centralizó en /api/checkout/pedidos para validar stock, cupón, envío e idempotencia.",
+  });
 }
 
 export async function postCancelarPedido(req, res) {

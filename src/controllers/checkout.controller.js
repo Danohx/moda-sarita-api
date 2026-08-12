@@ -3,6 +3,7 @@ import {
   confirmarPedidoWeb,
   cancelarPedidoWeb,
   validarCuponCheckout,
+  obtenerOpcionesCreditoWeb,
 } from "../models/checkout.model.js";
 
 function handleCheckoutError(res, error, fallbackMessage) {
@@ -122,5 +123,14 @@ export async function postValidarCuponCheckout(req, res) {
       code: error.code || "COUPON_ERROR",
       msg: error.message || "No se pudo validar el cupón.",
     });
+  }
+}
+
+export async function getOpcionesCreditoWeb(req, res) {
+  try {
+    const data = await obtenerOpcionesCreditoWeb(req.db, req.user.id, req.query.total);
+    return res.json({ ok: true, data });
+  } catch (error) {
+    return handleCheckoutError(res, error, "No se pudo consultar la disponibilidad de crédito.");
   }
 }

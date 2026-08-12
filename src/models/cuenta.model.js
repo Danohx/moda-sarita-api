@@ -1,3 +1,5 @@
+import { obtenerCreditosCliente } from "./credito.model.js";
+
 function modelError(message, status = 400, code = "VALIDATION") {
   const error = new Error(message);
   error.status = status;
@@ -111,6 +113,84 @@ export async function obtenerMiCuenta(db, usuarioId) {
   );
 
   return rows[0] || null;
+}
+
+export async function obtenerMiResumenPortal(db, usuarioId) {
+  const cliente = await requireCliente(db, usuarioId);
+
+  const resumenResult = await db.query(
+    `
+      SELECT
+        COUNT(*) FILTER (
+          WHERE p.tipo IN ('WEB', 'PUNTO_VENTA')
+        )::int AS pedidos_total,
+        COUNT(*) FILTER (
+          WHERE p.tipo IN ('WEB', 'PUNTO_VENTA')
+            AND p.estado IN ('PENDIENTE', 'PAGADO', 'ENVIADO')
+        )::int AS pedidos_en_proceso,
+        COUNT(*) FILTER (
+          WHERE p.tipo = 'APARTADO'
+        )::int AS apartados_total,
+        COUNT(*) FILTER (
+          WHERE p.tipo = 'APARTADO'
+            AND p.estado = 'ACTIVO'
+        )::int AS apartados_activos,
+        (
+          SELECT COUNT(*)::int
+          FROM clientes.direcciones d
+          WHERE d.cliente_id = $1::uuid
+        ) AS direcciones_total,
+        (
+          SELECT COUNT(*)::int
+          FROM clientes.creditos cr
+          WHERE cr.cliente_id = $1::uuid
+        ) AS creditos_total,
+        (
+          SELECT COUNT(*)::int
+          FROM clientes.creditos cr
+          WHERE cr.cliente_id = $1::uuid
+            AND cr.estado::text IN ('ACTIVO', 'EN_MORA', 'INCUMPLIDO')
+        ) AS creditos_activos
+      FROM ventas.pedidos p
+      WHERE p.cliente_id = $1::uuid
+    `,
+    [cliente.id],
+  );
+
+  const recientesResult = await db.query(
+    `
+      SELECT
+        vpr.*,
+        (
+          SELECT COALESCE(SUM(d.cantidad), 0)::int
+          FROM ventas.detalles_pedido d
+          WHERE d.pedido_id = vpr.id
+        ) AS items_count
+      FROM ventas.v_pedidos_resumen vpr
+      WHERE vpr.cliente_id = $1::uuid
+        AND vpr.tipo IN ('WEB', 'PUNTO_VENTA')
+      ORDER BY vpr.fecha_creacion DESC, vpr.folio DESC
+      LIMIT 3
+    `,
+    [cliente.id],
+  );
+
+  const resumen = resumenResult.rows[0] || {};
+  const limiteCredito = Number(cliente.limite_credito || 0);
+  const saldoDeudor = Number(cliente.saldo_deudor || 0);
+
+  return {
+    pedidos_total: Number(resumen.pedidos_total || 0),
+    pedidos_en_proceso: Number(resumen.pedidos_en_proceso || 0),
+    apartados_total: Number(resumen.apartados_total || 0),
+    apartados_activos: Number(resumen.apartados_activos || 0),
+    direcciones_total: Number(resumen.direcciones_total || 0),
+    creditos_total: Number(resumen.creditos_total || 0),
+    creditos_activos: Number(resumen.creditos_activos || 0),
+    credito_habilitado: cliente.tiene_credito === true,
+    credito_disponible: Math.max(limiteCredito - saldoDeudor, 0),
+    pedidos_recientes: recientesResult.rows,
+  };
 }
 
 export async function actualizarMiPerfil(
@@ -645,21 +725,25 @@ export async function listarMisMovimientosCredito(
   const { rows } = await db.query(
     `
       SELECT
-        id,
-        pedido_id,
-        pago_id,
-        fecha,
-        LOWER(tipo) AS tipo,
-        descripcion,
-        monto,
-        saldo_anterior,
-        saldo_resultante AS "saldoResultante",
-        metodo_pago,
-        referencia_externa,
-        observaciones
-      FROM clientes.movimientos_credito
-      WHERE cliente_id = $1::uuid
-      ORDER BY fecha DESC, id DESC
+        mc.id,
+        mc.credito_id,
+        mc.cuota_id,
+        mc.pedido_id,
+        p.folio AS pedido_folio,
+        mc.pago_id,
+        mc.fecha,
+        LOWER(mc.tipo) AS tipo,
+        mc.descripcion,
+        mc.monto,
+        mc.saldo_anterior,
+        mc.saldo_resultante AS "saldoResultante",
+        mc.metodo_pago,
+        mc.referencia_externa,
+        mc.observaciones
+      FROM clientes.movimientos_credito mc
+      LEFT JOIN ventas.pedidos p ON p.id = mc.pedido_id
+      WHERE mc.cliente_id = $1::uuid
+      ORDER BY mc.fecha DESC, mc.id DESC
       LIMIT $2 OFFSET $3
     `,
     [cliente.id, safeLimit, safeOffsetValue],
@@ -673,6 +757,208 @@ export async function listarMisMovimientosCredito(
     offset: safeOffsetValue,
     hasMore: safeOffsetValue + rows.length < total,
   };
+}
+
+export async function listarMisCreditos(
+  db,
+  usuarioId,
+  { estado = null, limit = 50, offset = 0 } = {},
+) {
+  const cliente = await requireCliente(db, usuarioId);
+
+  return obtenerCreditosCliente(db, cliente.id, {
+    estado: estado ? String(estado).trim().toUpperCase() : null,
+    limit: positiveLimit(limit, 50),
+    offset: safeOffset(offset),
+  });
+}
+
+async function requireOwnedCredito(db, usuarioId, creditoId) {
+  const cliente = await requireCliente(db, usuarioId);
+  const { rows } = await db.query(
+    `
+      SELECT c.id, c.pedido_id
+      FROM clientes.creditos c
+      WHERE c.id = $1::uuid
+        AND c.cliente_id = $2::uuid
+      LIMIT 1
+    `,
+    [creditoId, cliente.id],
+  );
+
+  if (!rows[0]) return null;
+  return { cliente, credito: rows[0] };
+}
+
+export async function obtenerMiCreditoDetalle(db, usuarioId, creditoId) {
+  const owned = await requireOwnedCredito(db, usuarioId, creditoId);
+  if (!owned) return null;
+
+  const { rows: creditRows } = await db.query(
+    `
+      SELECT *
+      FROM clientes.v_creditos_resumen
+      WHERE credito_id = $1::uuid
+        AND cliente_id = $2::uuid
+      LIMIT 1
+    `,
+    [creditoId, owned.cliente.id],
+  );
+
+  const credito = creditRows[0];
+  if (!credito) return null;
+
+  let pedido = null;
+  if (credito.pedido_id) {
+    const { rows } = await db.query(
+      `
+        SELECT
+          id,
+          folio,
+          cliente_id,
+          tipo,
+          estado,
+          total,
+          fecha_creacion,
+          tipo_entrega,
+          metodo_pago_solicitado
+        FROM ventas.v_pedidos_resumen
+        WHERE id = $1::uuid
+          AND cliente_id = $2::uuid
+        LIMIT 1
+      `,
+      [credito.pedido_id, owned.cliente.id],
+    );
+    pedido = rows[0] ? { pedido: rows[0] } : null;
+  }
+
+  return { credito, pedido };
+}
+
+export async function listarMisCuotasCredito(
+  db,
+  usuarioId,
+  creditoId,
+  { limit = 12, offset = 0 } = {},
+) {
+  const owned = await requireOwnedCredito(db, usuarioId, creditoId);
+  if (!owned) return null;
+
+  const safeLimit = positiveLimit(limit, 12);
+  const safeOffsetValue = safeOffset(offset);
+  const countResult = await db.query(
+    `SELECT COUNT(*)::int AS total FROM clientes.credito_cuotas WHERE credito_id = $1::uuid`,
+    [creditoId],
+  );
+  const { rows } = await db.query(
+    `
+      SELECT
+        id,
+        credito_id,
+        numero_cuota,
+        fecha_vencimiento,
+        monto_programado,
+        monto_pagado,
+        monto_condonado,
+        saldo_pendiente,
+        fecha_pago_completo,
+        estado
+      FROM clientes.credito_cuotas
+      WHERE credito_id = $1::uuid
+      ORDER BY numero_cuota ASC
+      LIMIT $2 OFFSET $3
+    `,
+    [creditoId, safeLimit, safeOffsetValue],
+  );
+  const total = Number(countResult.rows[0]?.total || 0);
+  return { items: rows, total, limit: safeLimit, offset: safeOffsetValue, hasMore: safeOffsetValue + rows.length < total };
+}
+
+export async function listarMisPagosCredito(
+  db,
+  usuarioId,
+  creditoId,
+  { limit = 4, offset = 0 } = {},
+) {
+  const owned = await requireOwnedCredito(db, usuarioId, creditoId);
+  if (!owned) return null;
+
+  const safeLimit = positiveLimit(limit, 4);
+  const safeOffsetValue = safeOffset(offset);
+  const countResult = await db.query(
+    `SELECT COUNT(*)::int AS total FROM ventas.pagos WHERE credito_id = $1::uuid`,
+    [creditoId],
+  );
+  const { rows } = await db.query(
+    `
+      SELECT
+        p.id,
+        p.pedido_id,
+        p.credito_id,
+        p.monto,
+        p.metodo,
+        p.referencia_externa,
+        p.fecha_pago,
+        p.concepto,
+        p.estado,
+        p.usuario_id,
+        COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'aplicacion_id', ap.id,
+              'cuota_id', ap.cuota_id,
+              'numero_cuota', cc.numero_cuota,
+              'fecha_vencimiento', cc.fecha_vencimiento,
+              'monto_aplicado', ap.monto_aplicado,
+              'fecha_aplicacion', ap.fecha_aplicacion
+            ) ORDER BY cc.numero_cuota ASC, ap.fecha_aplicacion ASC, ap.id ASC
+          ) FILTER (WHERE ap.id IS NOT NULL),
+          '[]'::jsonb
+        ) AS aplicaciones
+      FROM ventas.pagos p
+      LEFT JOIN clientes.credito_aplicaciones_pago ap ON ap.pago_id = p.id
+      LEFT JOIN clientes.credito_cuotas cc ON cc.id = ap.cuota_id
+      WHERE p.credito_id = $1::uuid
+      GROUP BY p.id
+      ORDER BY p.fecha_pago DESC, p.id DESC
+      LIMIT $2 OFFSET $3
+    `,
+    [creditoId, safeLimit, safeOffsetValue],
+  );
+  const total = Number(countResult.rows[0]?.total || 0);
+  return { items: rows, total, limit: safeLimit, offset: safeOffsetValue, hasMore: safeOffsetValue + rows.length < total };
+}
+
+export async function listarMisMovimientosCreditoPorCredito(
+  db,
+  usuarioId,
+  creditoId,
+  { limit = 4, offset = 0 } = {},
+) {
+  const owned = await requireOwnedCredito(db, usuarioId, creditoId);
+  if (!owned) return null;
+
+  const safeLimit = positiveLimit(limit, 4);
+  const safeOffsetValue = safeOffset(offset);
+  const countResult = await db.query(
+    `SELECT COUNT(*)::int AS total FROM clientes.movimientos_credito WHERE credito_id = $1::uuid`,
+    [creditoId],
+  );
+  const { rows } = await db.query(
+    `
+      SELECT
+        id, cliente_id, pedido_id, pago_id, credito_id, cuota_id,
+        fecha, tipo, descripcion, monto, saldo_anterior, saldo_resultante,
+        metodo_pago, referencia_externa, observaciones, created_at
+      FROM clientes.movimientos_credito
+      WHERE credito_id = $1::uuid
+      ORDER BY fecha DESC, id DESC
+      LIMIT $2 OFFSET $3
+    `,
+    [creditoId, safeLimit, safeOffsetValue],
+  );
+  const total = Number(countResult.rows[0]?.total || 0);
+  return { items: rows, total, limit: safeLimit, offset: safeOffsetValue, hasMore: safeOffsetValue + rows.length < total };
 }
 
 export async function listarMisPedidos(
@@ -729,7 +1015,40 @@ export async function listarMisPedidos(
   };
 }
 
-export async function obtenerMiPedido(db, usuarioId, pedidoId) {
+export async function listarMisPagosPedido(
+  db,
+  usuarioId,
+  pedidoId,
+  { limit = 4, offset = 0 } = {},
+) {
+  const cliente = await requireCliente(db, usuarioId);
+  const ownership = await db.query(
+    `SELECT id FROM ventas.pedidos WHERE id = $1::uuid AND cliente_id = $2::uuid LIMIT 1`,
+    [pedidoId, cliente.id],
+  );
+  if (!ownership.rows[0]) return null;
+
+  const safeLimit = positiveLimit(limit, 4);
+  const safeOffsetValue = safeOffset(offset);
+  const countResult = await db.query(
+    `SELECT COUNT(*)::int AS total FROM ventas.pagos WHERE pedido_id = $1::uuid`,
+    [pedidoId],
+  );
+  const { rows } = await db.query(
+    `
+      SELECT id, pedido_id, monto, metodo, referencia_externa, fecha_pago, concepto, estado
+      FROM ventas.pagos
+      WHERE pedido_id = $1::uuid
+      ORDER BY fecha_pago DESC, id DESC
+      LIMIT $2 OFFSET $3
+    `,
+    [pedidoId, safeLimit, safeOffsetValue],
+  );
+  const total = Number(countResult.rows[0]?.total || 0);
+  return { items: rows, total, limit: safeLimit, offset: safeOffsetValue, hasMore: safeOffsetValue + rows.length < total };
+}
+
+export async function obtenerMiPedido(db, usuarioId, pedidoId, { pagosLimit = 4 } = {}) {
   const cliente = await requireCliente(db, usuarioId);
 
   const pedidoResult = await db.query(
@@ -780,27 +1099,54 @@ export async function obtenerMiPedido(db, usuarioId, pedidoId) {
     [pedidoId],
   );
 
-  const pagosResult = await db.query(
+  const pagosData = await listarMisPagosPedido(db, usuarioId, pedidoId, {
+    limit: pagosLimit,
+    offset: 0,
+  });
+
+  const direccionResult = await db.query(
     `
       SELECT
         id,
-        pedido_id,
-        monto,
-        metodo,
-        referencia_externa,
-        fecha_pago,
-        concepto,
-        estado
-      FROM ventas.pagos
+        nombre_destinatario,
+        telefono,
+        calle,
+        numero_exterior,
+        numero_interior,
+        colonia,
+        ciudad,
+        estado,
+        codigo_postal,
+        referencias
+      FROM ventas.direcciones_pedido
       WHERE pedido_id = $1::uuid
-      ORDER BY fecha_pago ASC
+      LIMIT 1
     `,
     [pedidoId],
+  );
+
+  pedido.direccion = direccionResult.rows[0] || null;
+
+  const creditoResult = await db.query(
+    `
+      SELECT
+        id AS credito_id,
+        estado::text AS credito_estado,
+        monto_financiado,
+        saldo_pendiente
+      FROM clientes.creditos
+      WHERE pedido_id = $1::uuid
+        AND cliente_id = $2::uuid
+      LIMIT 1
+    `,
+    [pedidoId, cliente.id],
   );
 
   return {
     pedido,
     detalles: detallesResult.rows,
-    pagos: pagosResult.rows,
+    pagos: pagosData?.items ?? [],
+    pagos_pagination: pagosData ?? { total: 0, limit: pagosLimit, offset: 0, hasMore: false },
+    credito: creditoResult.rows[0] || null,
   };
 }

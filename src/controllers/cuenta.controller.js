@@ -6,9 +6,16 @@ import {
   establecerMiDireccionPrincipal,
   listarMisDirecciones,
   listarMisMovimientosCredito,
+  listarMisMovimientosCreditoPorCredito,
+  listarMisCuotasCredito,
+  listarMisPagosCredito,
+  listarMisPagosPedido,
+  listarMisCreditos,
   listarMisPedidos,
   obtenerMiCredito,
+  obtenerMiCreditoDetalle,
   obtenerMiCuenta,
+  obtenerMiResumenPortal,
   obtenerMiPedido,
 } from "../models/cuenta.model.js";
 
@@ -51,6 +58,15 @@ export async function getMiCuenta(req, res) {
     return res.json({ ok: true, data });
   } catch (error) {
     return handleError(res, error, "Error obteniendo la cuenta.");
+  }
+}
+
+export async function getMiResumenPortal(req, res) {
+  try {
+    const data = await obtenerMiResumenPortal(req.db, req.user.id);
+    return res.json({ ok: true, data });
+  } catch (error) {
+    return handleError(res, error, "Error obteniendo el resumen de tu cuenta.");
   }
 }
 
@@ -148,6 +164,75 @@ export async function getMisMovimientosCredito(req, res) {
     });
   } catch (error) {
     return handleError(res, error, "Error obteniendo los movimientos de crédito.");
+  }
+}
+
+export async function getMisCreditos(req, res) {
+  try {
+    const data = await listarMisCreditos(req.db, req.user.id, {
+      estado: req.query.estado || null,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json({ ok: true, data });
+  } catch (error) {
+    return handleError(res, error, "Error obteniendo tus créditos.");
+  }
+}
+
+export async function getMiCreditoDetalle(req, res) {
+  try {
+    const data = await obtenerMiCreditoDetalle(
+      req.db,
+      req.user.id,
+      req.params.creditoId,
+    );
+    if (!data) {
+      return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
+    }
+    return res.json({ ok: true, data });
+  } catch (error) {
+    return handleError(res, error, "Error obteniendo el detalle del crédito.");
+  }
+}
+
+export async function getMisCuotasCredito(req, res) {
+  try {
+    const data = await listarMisCuotasCredito(req.db, req.user.id, req.params.creditoId, req.query);
+    if (!data) return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
+    return res.json({ ok: true, data: data.items, pagination: data });
+  } catch (error) {
+    return handleError(res, error, "Error obteniendo las cuotas del crédito.");
+  }
+}
+
+export async function getMisPagosCredito(req, res) {
+  try {
+    const data = await listarMisPagosCredito(req.db, req.user.id, req.params.creditoId, req.query);
+    if (!data) return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
+    return res.json({ ok: true, data: data.items, pagination: data });
+  } catch (error) {
+    return handleError(res, error, "Error obteniendo los pagos del crédito.");
+  }
+}
+
+export async function getMisMovimientosCreditoDetalle(req, res) {
+  try {
+    const data = await listarMisMovimientosCreditoPorCredito(req.db, req.user.id, req.params.creditoId, req.query);
+    if (!data) return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
+    return res.json({ ok: true, data: data.items, pagination: data });
+  } catch (error) {
+    return handleError(res, error, "Error obteniendo los movimientos del crédito.");
+  }
+}
+
+export async function getMisPagosPedido(req, res) {
+  try {
+    const data = await listarMisPagosPedido(req.db, req.user.id, req.params.pedidoId, req.query);
+    if (!data) return res.status(404).json({ ok: false, msg: "Pedido no encontrado." });
+    return res.json({ ok: true, data: data.items, pagination: data });
+  } catch (error) {
+    return handleError(res, error, "Error obteniendo los pagos del pedido.");
   }
 }
 

@@ -1,5 +1,16 @@
 import { createHash } from "node:crypto";
 import { getConfigCheckout } from "../services/configuracion.service.js";
+import {
+  crearCreditoEnTransaccion,
+  obtenerParametrosCredito,
+} from "./credito.model.js";
+import {
+  calcularPlanCredito,
+  evaluarElegibilidadCliente,
+  normalizarConfiguracionCredito,
+  sumarDiasISO,
+  sumarMesesAncladosISO,
+} from "../services/credito.service.js";
 
 function checkoutError(message, status = 400, code = "VALIDATION") {
   const error = new Error(message);
@@ -47,19 +58,28 @@ function normalizeOptional(value) {
 
 function buildCheckoutFingerprint({
   items,
+  tipo_entrega,
   direccion_id,
   metodo_pago,
   referencia_externa,
   cupon_codigo,
   observaciones,
+  credito,
 }) {
   const payload = {
     items,
-    direccion_id: String(direccion_id),
+    tipo_entrega: String(tipo_entrega || "RECOGER").toUpperCase(),
+    direccion_id: direccion_id ? String(direccion_id) : null,
     metodo_pago: String(metodo_pago).toUpperCase(),
     referencia_externa: normalizeOptional(referencia_externa),
     cupon_codigo: normalizeOptional(cupon_codigo)?.toUpperCase() ?? null,
     observaciones: normalizeOptional(observaciones),
+    credito: credito
+      ? {
+          plazo_meses: Number(credito.plazo_meses),
+          frecuencia_pago: String(credito.frecuencia_pago || "").toUpperCase(),
+        }
+      : null,
   };
 
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
@@ -80,8 +100,11 @@ async function getCheckoutResultByPedidoId(
         p.descuento,
         p.costo_envio,
         p.total,
-        pg.metodo::text AS metodo_pago,
-        pg.estado::text AS pago_estado
+        COALESCE(pg.metodo::text, p.metodo_pago_solicitado::text) AS metodo_pago,
+        CASE
+          WHEN p.metodo_pago_solicitado::text = 'CREDITO_TIENDA' AND pg.estado IS NULL THEN 'FINANCIADO'
+          ELSE pg.estado::text
+        END AS pago_estado
       FROM ventas.pedidos p
       LEFT JOIN LATERAL (
         SELECT
@@ -143,22 +166,125 @@ async function getCheckoutResultByPedidoId(
   };
 }
 
-async function getClienteForUpdate(client, usuarioId) {
-  const { rows } = await client.query(
+async function getClienteCreditoByUsuario(db, usuarioId, { lock = false } = {}) {
+  const lockClause = lock ? "FOR UPDATE" : "";
+  const { rows } = await db.query(
     `
       SELECT
         c.*,
-        CONCAT_WS(' ', c.nombres, c.apellido_paterno, c.apellido_materno)
-          AS nombre_completo
+        CONCAT_WS(' ', c.nombres, c.apellido_paterno, c.apellido_materno) AS nombre_completo,
+        (
+          SELECT count(*)::integer FROM clientes.creditos cr
+          WHERE cr.cliente_id = c.id AND cr.estado IN ('ACTIVO','EN_MORA','INCUMPLIDO')
+        ) AS creditos_activos,
+        (
+          SELECT count(*)::integer FROM clientes.creditos cr
+          WHERE cr.cliente_id = c.id AND cr.estado = 'EN_MORA'
+        ) AS creditos_en_mora,
+        (
+          SELECT count(*)::integer FROM clientes.creditos cr
+          WHERE cr.cliente_id = c.id AND cr.estado = 'INCUMPLIDO'
+        ) AS creditos_incumplidos,
+        (
+          SELECT count(*)::integer
+          FROM clientes.credito_cuotas cc
+          JOIN clientes.creditos cr ON cr.id = cc.credito_id
+          WHERE cr.cliente_id = c.id AND cc.estado = 'VENCIDA' AND cc.saldo_pendiente > 0
+        ) AS cuotas_vencidas
       FROM clientes.clientes c
       WHERE c.usuario_id = $1::uuid
         AND c.activo = true
-      FOR UPDATE
+      ${lockClause}
     `,
     [usuarioId],
   );
-
   return rows[0] || null;
+}
+
+async function getClienteForUpdate(client, usuarioId) {
+  return getClienteCreditoByUsuario(client, usuarioId, { lock: true });
+}
+
+function nextCreditDueDate(frequency) {
+  const today = new Date().toISOString().slice(0, 10);
+  const normalized = String(frequency || "").toUpperCase();
+  if (normalized === "SEMANAL") return sumarDiasISO(today, 7);
+  if (normalized === "QUINCENAL") return sumarDiasISO(today, 15);
+  return sumarMesesAncladosISO(today, 1);
+}
+
+export async function obtenerOpcionesCreditoWeb(db, usuarioId, totalCompra) {
+  const total = money(totalCompra);
+  if (total <= 0) {
+    return { mostrar: false, elegible: false, motivo: "TOTAL_INVALIDO" };
+  }
+
+  const cliente = await getClienteCreditoByUsuario(db, usuarioId);
+  if (!cliente) {
+    return { mostrar: false, elegible: false, motivo: "CLIENT_PROFILE_NOT_FOUND" };
+  }
+
+  const metodo = await getMetodoPagoWeb(db, "CREDITO_TIENDA");
+  if (!metodo || metodo.activo_web !== true) {
+    return { mostrar: false, elegible: false, motivo: "METODO_WEB_INACTIVO" };
+  }
+
+  const limiteCredito = money(cliente.limite_credito || 0);
+  const creditoActivo = cliente.tiene_credito === true && limiteCredito > 0;
+
+  if (!creditoActivo) {
+    return {
+      mostrar: false,
+      elegible: false,
+      motivo: cliente.tiene_credito === true
+        ? "LIMITE_NO_CONFIGURADO"
+        : "CREDITO_NO_HABILITADO",
+      limite_credito: limiteCredito,
+      saldo_deudor: money(cliente.saldo_deudor || 0),
+      credito_disponible: Math.max(
+        money(limiteCredito - Number(cliente.saldo_deudor || 0)),
+        0,
+      ),
+    };
+  }
+
+  const parametros = await obtenerParametrosCredito(db);
+  const config = normalizarConfiguracionCredito(parametros);
+  if (!config.permiteEngancheCero || config.porcentajeEngancheMinimo > 0) {
+    return {
+      mostrar: true,
+      elegible: false,
+      motivo: "ENGANCHE_WEB_REQUERIDO",
+      mensaje: "Tu crédito está activo, pero la configuración actual exige enganche y todavía no se cobra el enganche desde la tienda web.",
+      limite_credito: limiteCredito,
+      saldo_deudor: money(cliente.saldo_deudor || 0),
+      credito_disponible: Math.max(
+        money(limiteCredito - Number(cliente.saldo_deudor || 0)),
+        0,
+      ),
+      plazos: config.plazosPermitidos,
+      frecuencias: config.frecuenciasPermitidas,
+    };
+  }
+
+  const elegibilidad = evaluarElegibilidadCliente({
+    cliente,
+    montoFinanciado: total,
+    configuracion: parametros,
+  });
+
+  return {
+    // "mostrar" significa que el cliente posee una línea de crédito activa.
+    // "elegible" indica si puede usarla para ESTA compra concreta.
+    mostrar: true,
+    elegible: elegibilidad.apto,
+    motivo: elegibilidad.apto
+      ? null
+      : elegibilidad.validaciones_incumplidas[0] || "NO_ELEGIBLE",
+    ...elegibilidad,
+    plazos: config.plazosPermitidos,
+    frecuencias: config.frecuenciasPermitidas,
+  };
 }
 
 async function getMetodoPagoWeb(client, metodo) {
@@ -474,6 +600,7 @@ export async function crearPedidoWeb(
     referencia_externa = null,
     cupon_codigo = null,
     observaciones = null,
+    credito = null,
     idempotency_key,
   },
 ) {
@@ -517,6 +644,7 @@ export async function crearPedidoWeb(
     referencia_externa,
     cupon_codigo,
     observaciones,
+    credito: metodo === "CREDITO_TIENDA" ? credito : null,
   });
 
   const client = await db.connect();
@@ -715,22 +843,46 @@ export async function crearPedidoWeb(
     const esCredito =
       paymentConfig.es_credito === true || metodo === "CREDITO_TIENDA";
 
+    let planCredito = null;
     if (esCredito) {
-      if (cliente.tiene_credito !== true) {
-        throw checkoutError("La cuenta no tiene crédito de tienda habilitado.");
-      }
+      const parametrosCredito = await obtenerParametrosCredito(client);
+      const configCredito = normalizarConfiguracionCredito(parametrosCredito);
 
-      const disponible = money(
-        Number(cliente.limite_credito || 0) - Number(cliente.saldo_deudor || 0),
-      );
-
-      if (total > disponible) {
+      if (!configCredito.permiteEngancheCero || configCredito.porcentajeEngancheMinimo > 0) {
         throw checkoutError(
-          `Crédito insuficiente. Disponible: $${disponible.toFixed(2)}.`,
+          "El crédito web no está disponible porque la configuración actual requiere enganche.",
           409,
-          "INSUFFICIENT_CREDIT",
+          "WEB_CREDIT_DOWNPAYMENT_REQUIRED",
         );
       }
+
+      const plazoMeses = Number(credito?.plazo_meses);
+      const frecuenciaPago = String(credito?.frecuencia_pago || "").trim().toUpperCase();
+      if (!Number.isInteger(plazoMeses) || !frecuenciaPago) {
+        throw checkoutError("Selecciona plazo y frecuencia para el crédito de tienda.", 400, "CREDIT_PLAN_REQUIRED");
+      }
+
+      const elegibilidad = evaluarElegibilidadCliente({
+        cliente,
+        montoFinanciado: total,
+        configuracion: parametrosCredito,
+      });
+      if (!elegibilidad.apto) {
+        throw checkoutError(
+          "Tu línea de crédito no cumple actualmente las condiciones para financiar esta compra.",
+          409,
+          "CREDIT_NOT_ELIGIBLE",
+        );
+      }
+
+      planCredito = calcularPlanCredito({
+        totalCompra: total,
+        enganche: 0,
+        plazoMeses,
+        frecuenciaPago,
+        fechaPrimerVencimiento: nextCreditDueDate(frecuenciaPago),
+        configuracion: parametrosCredito,
+      });
     }
 
     const costoEnvioConfirmado = true;
@@ -823,118 +975,68 @@ export async function crearPedidoWeb(
       );
 
       if (esCredito) {
-        await client.query(
+        const salidaResult = await client.query(
           `
             UPDATE inventario.variantes_producto
             SET stock_fisico = stock_fisico - $2, updated_at = now()
             WHERE id = $1::uuid
+              AND activo = true
+              AND (stock_fisico - stock_apartado) >= $2
+            RETURNING id
           `,
           [item.variante_id, item.cantidad],
         );
-
+        if (!salidaResult.rows[0]) {
+          throw checkoutError(`El stock de ${item.producto_nombre} cambió antes de confirmar el pedido.`, 409, "STOCK");
+        }
         await client.query(
-          `
-            INSERT INTO inventario.movimientos (
-              variante_id,
-              usuario_id,
-              cantidad,
-              motivo,
-              tipo
-            )
-            VALUES ($1,$2,$3,$4,'SALIDA')
-          `,
-          [
-            item.variante_id,
-            usuarioId,
-            -Math.abs(item.cantidad),
-            `Pedido web pagado con crédito, folio ${pedido.folio}`,
-          ],
+          `INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo, tipo) VALUES ($1,$2,$3,$4,'SALIDA')`,
+          [item.variante_id, usuarioId, -Math.abs(item.cantidad), `Venta web a crédito, folio ${pedido.folio}`],
         );
       } else {
-        // Reserva temporal para un pedido pendiente de confirmación.
-        await client.query(
+        const reservaResult = await client.query(
           `
             UPDATE inventario.variantes_producto
             SET stock_apartado = stock_apartado + $2, updated_at = now()
             WHERE id = $1::uuid
+              AND activo = true
+              AND (stock_fisico - stock_apartado) >= $2
+            RETURNING id
           `,
           [item.variante_id, item.cantidad],
         );
+        if (!reservaResult.rows[0]) {
+          throw checkoutError(`El stock de ${item.producto_nombre} cambió antes de confirmar el pedido.`, 409, "STOCK");
+        }
       }
     }
 
-    const pagoEstado = esCredito ? "CONFIRMADO" : "PENDIENTE";
-    const pagoResult = await client.query(
-      `
-        INSERT INTO ventas.pagos (
-          pedido_id,
-          monto,
-          metodo,
-          referencia_externa,
-          concepto,
-          estado,
-          usuario_id
-        )
-        VALUES ($1,$2,$3,$4,'PAGO_TOTAL',$5,$6)
-        RETURNING *
-      `,
-      [
-        pedido.id,
-        total,
-        metodo,
-        referencia_externa ? String(referencia_externa).trim() : null,
-        pagoEstado,
-        esCredito ? usuarioId : null,
-      ],
-    );
+    let pagoEstado = "PENDIENTE";
+    let creditoCreado = null;
 
     if (esCredito) {
-      const saldoAnterior = money(cliente.saldo_deudor || 0);
-      const saldoResultante = money(saldoAnterior + total);
-
+      creditoCreado = await crearCreditoEnTransaccion(client, {
+        clienteId: cliente.id,
+        pedidoId: pedido.id,
+        plan: planCredito,
+        origen: "WEB",
+        usuarioId,
+        pagoEnganche: null,
+      });
       await client.query(
-        `
-          UPDATE clientes.clientes
-          SET saldo_deudor = $2, fecha_actualizacion_credito = now()
-          WHERE id = $1::uuid
-        `,
-        [cliente.id, saldoResultante],
-      );
-
-      await client.query(
-        `
-          INSERT INTO clientes.movimientos_credito (
-            cliente_id,
-            usuario_id,
-            pedido_id,
-            pago_id,
-            tipo,
-            descripcion,
-            monto,
-            saldo_anterior,
-            saldo_resultante,
-            metodo_pago,
-            referencia_externa
-          )
-          VALUES ($1,$2,$3,$4,'COMPRA',$5,$6,$7,$8,$9,$10)
-        `,
-        [
-          cliente.id,
-          usuarioId,
-          pedido.id,
-          pagoResult.rows[0].id,
-          `Compra web folio ${pedido.folio}`,
-          total,
-          saldoAnterior,
-          saldoResultante,
-          metodo,
-          referencia_externa,
-        ],
-      );
-
-      await client.query(
-        `UPDATE ventas.pedidos SET estado = 'PAGADO', liquidado_at = now() WHERE id = $1`,
+        `UPDATE ventas.pedidos SET estado = 'PAGADO', liquidado_at = now(), metodo_pago_solicitado = 'CREDITO_TIENDA' WHERE id = $1::uuid`,
         [pedido.id],
+      );
+      pagoEstado = "FINANCIADO";
+    } else {
+      await client.query(
+        `
+          INSERT INTO ventas.pagos (
+            pedido_id, monto, metodo, referencia_externa, concepto, estado, usuario_id
+          )
+          VALUES ($1,$2,$3,$4,'PAGO_TOTAL','PENDIENTE',NULL)
+        `,
+        [pedido.id, total, metodo, referencia_externa ? String(referencia_externa).trim() : null],
       );
     }
 
@@ -950,6 +1052,7 @@ export async function crearPedidoWeb(
       total,
       metodo_pago: metodo,
       pago_estado: pagoEstado,
+      credito_id: creditoCreado?.credito?.id ?? null,
       items: orderItems,
     };
   } catch (error) {
