@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { useInternalDb } from "../middleware/dbContext.js";
-import { requireAuth, requireRole } from "../middleware/seguridad.js";
+import { requireAuth, requireAnyPermission } from "../middleware/seguridad.js";
 import {
   getCorteActualDetallado,
   getCorteDetalladoPorId,
@@ -8,9 +8,17 @@ import {
 
 const router = Router();
 
-router.use(useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"));
+router.use(useInternalDb, requireAuth);
 
-router.get("/actual", getCorteActualDetallado);
-router.get("/:id", getCorteDetalladoPorId);
+router.get(
+  "/actual",
+  requireAnyPermission("ventas.corte_caja.read", "ventas.corte_caja.history"),
+  getCorteActualDetallado,
+);
+router.get(
+  "/:id",
+  requireAnyPermission("ventas.corte_caja.history", "ventas.corte_caja.read"),
+  getCorteDetalladoPorId,
+);
 
 export default router;

@@ -236,7 +236,7 @@ export async function postMovimientoInventario(req, res) {
   } catch (err) {
     console.error("postMovimientoInventario error:", err);
 
-    if (err?.code === "STOCK_NEGATIVO") {
+    if (["STOCK_NEGATIVO", "STOCK_RESERVADO"].includes(err?.code)) {
       return res.status(409).json({ ok: false, msg: err.message });
     }
 

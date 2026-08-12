@@ -1,9 +1,6 @@
 import {
   crearVentaPOS,
-  crearApartado,
-  abonarApartado,
-  liquidarApartado,
-  cancelarApartado,
+  cancelarVentaPOS,
   abrirCorte,
   getCorteAbierto,
   cerrarCorte,
@@ -13,7 +10,13 @@ import {
   getVentaHistorialDetalle,
 } from "../models/ventas.model.js";
 import { getConfigPOS } from "../services/configuracion.service.js";
-import { getPedidoDetalleAdmin } from "../models/pedidos.model.js";
+import {
+  getPedidoDetalleAdmin,
+  crearApartado,
+  registrarAbonoApartado,
+  liquidarApartado,
+  cancelarApartado,
+} from "../models/pedidos.model.js";
 import { generarTicketPedidoPdfStream } from "../utils/pdf/ticketPedido.pdf.js";
 import { getConfigTicket } from "../services/configuracion.service.js";
 import { createAuditLog } from "../utils/audit.util.js";
@@ -113,6 +116,99 @@ export async function postVentaPOS(req, res) {
   }
 }
 
+export async function postCancelarVentaPOS(req, res) {
+  try {
+    const pedido_id = String(req.params.id || "").trim();
+    const { motivo, metodo_reembolso = null, referencia_reembolso = null } =
+      req.body || {};
+
+    const permissionSet = new Set([
+      ...(Array.isArray(req.user?.permisos) ? req.user.permisos : []),
+      ...(Array.isArray(req.user?.permissions) ? req.user.permissions : []),
+    ]);
+    const roleName = String(req.user?.rol || req.user?.role || "")
+      .trim()
+      .toUpperCase();
+    const legacyRefund = permissionSet.has("ventas.pos.refund");
+    const legacyAdmin =
+      legacyRefund && ["ADMIN", "ADMINISTRADOR", "SUPERADMIN"].includes(roleName);
+    const canRefundAnySale =
+      permissionSet.has("ventas.pos.refund.any") || legacyAdmin;
+    const canRefundOwnSale =
+      canRefundAnySale ||
+      permissionSet.has("ventas.pos.refund.own") ||
+      legacyRefund;
+
+    if (!canRefundOwnSale) {
+      return res.status(403).json({
+        ok: false,
+        msg: "No tienes permiso para realizar devoluciones POS.",
+        code: "REFUND_PERMISSION_REQUIRED",
+      });
+    }
+
+    const out = await cancelarVentaPOS(req.db, {
+      pedido_id,
+      usuario_id: req.user?.id ?? null,
+      motivo,
+      metodo_reembolso,
+      referencia_reembolso,
+      puede_reembolsar_cualquier_venta: canRefundAnySale,
+    });
+
+    const ventaPropia =
+      Boolean(req.user?.id) &&
+      Boolean(out.venta?.vendedor_id) &&
+      String(out.venta.vendedor_id) === String(req.user.id);
+
+    await registrarAuditoriaVenta(req.db, {
+      modulo: "ventas.pos",
+      accion: "refund",
+      descripcion: `Se devolvió la venta ${getFolioVenta(out.venta)} por ${formatMoney(
+        out.reembolso?.monto,
+      )}.`,
+      usuarioId: req.user?.id ?? null,
+      metadata: {
+        venta_id: out.venta?.id,
+        folio: out.venta?.folio,
+        vendedor_original_id: out.venta?.vendedor_id ?? null,
+        devolucion_por_usuario_id: req.user?.id ?? null,
+        venta_propia: ventaPropia,
+        alcance_permiso: canRefundAnySale ? "ANY" : "OWN",
+        reembolso_id: out.reembolso?.id ?? null,
+        monto_reembolso: Number(out.reembolso?.monto ?? 0),
+        motivo: String(motivo || "").trim(),
+      },
+    });
+
+    return res.json({
+      ok: true,
+      msg: "Venta devuelta y stock reintegrado correctamente.",
+      data: out,
+    });
+  } catch (err) {
+    console.error("postCancelarVentaPOS error:", err);
+
+    const statusByCode = {
+      VALIDATION: 400,
+      NOT_FOUND: 404,
+      CONFLICT: 409,
+      REFUND_SCOPE_FORBIDDEN: 403,
+      CASH_CUT_REQUIRED: 409,
+      CREDIT_REFUND_REQUIRED: 409,
+      PAYMENT_RECONCILIATION: 409,
+      "22P02": 400,
+      "23514": 400,
+    };
+
+    return res.status(statusByCode[err.code] || 500).json({
+      ok: false,
+      msg: err.message || "Error devolviendo venta POS",
+      code: err.code || null,
+      detail: err.detail || undefined,
+    });
+  }
+}
 export async function postApartado(req, res) {
   try {
     const vendedor_id = req.user.id;
@@ -149,14 +245,18 @@ export async function postAbono(req, res) {
     const pedido_id = String(req.params.id);
     const { monto, metodo_pago, referencia_externa = null } = req.body || {};
 
-    const out = await abonarApartado(req.db, {
-      pedido_id,
+    const out = await registrarAbonoApartado(req.db, pedido_id, {
       monto,
-      metodo_pago,
+      metodo: String(metodo_pago || "").trim().toUpperCase(),
       referencia_externa,
+      usuario_id: req.user?.id ?? null,
     });
 
-    return res.status(201).json({ ok: true, data: out });
+    return res.status(201).json({
+      ok: true,
+      data: out.detalle,
+      pago_generado: out.pago_generado,
+    });
   } catch (err) {
     console.error("postAbono error:", err);
     if (err.code === "VALIDATION") {
@@ -177,14 +277,17 @@ export async function postLiquidar(req, res) {
     const vendedor_id = req.user.id;
     const { metodo_pago, referencia_externa = null } = req.body || {};
 
-    const out = await liquidarApartado(req.db, {
-      pedido_id,
-      vendedor_id,
-      metodo_pago,
+    const out = await liquidarApartado(req.db, pedido_id, {
+      metodo: String(metodo_pago || "").trim().toUpperCase(),
       referencia_externa,
+      usuario_id: vendedor_id,
     });
 
-    return res.json({ ok: true, data: out });
+    return res.json({
+      ok: true,
+      data: out.detalle,
+      pago_generado: out.pago_generado,
+    });
   } catch (err) {
     console.error("postLiquidar error:", err);
     if (err.code === "VALIDATION") {
@@ -210,17 +313,13 @@ export async function postCancelar(req, res) {
     const vendedor_id = req.user.id;
     const { motivo = "Cancelado" } = req.body || {};
 
-    const out = await cancelarApartado(req.db, {
-      pedido_id,
-      vendedor_id,
-      motivo,
+    const out = await cancelarApartado(req.db, pedido_id, {
+      motivo_cancelacion: motivo,
+      usuario_id: vendedor_id,
+      reembolso: { modo: "NINGUNO" },
     });
 
-    if (!out) {
-      return res.status(404).json({ ok: false, msg: "Pedido no encontrado" });
-    }
-
-    return res.json({ ok: true, data: out });
+    return res.json({ ok: true, data: out.detalle });
   } catch (err) {
     console.error("postCancelar error:", err);
     if (err.code === "VALIDATION") {

@@ -287,7 +287,7 @@ export async function createProductoConVarianteBase(db, payload) {
       variante_base.precio_venta,
       variante_base.precio_costo ?? null,
       variante_base.stock_fisico ?? 0,
-      variante_base.stock_apartado ?? 0,
+      0,
       variante_base.stock_minimo ?? 5,
       variante_base.activo !== false,
     ]);

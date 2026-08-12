@@ -7,8 +7,10 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "backup:bridge": "tsx src/scripts/backupsLocalBridge.ts"
+    "test": "node --test",
+    "backup:bridge": "tsx src/scripts/backupsLocalBridge.ts",
+    "test:stock": "node --test test/stock.model.test.js",
+    "test:stock:integration": "node --test test/stock.concurrency.integration.test.js"
   },
   "keywords": [],
   "author": "",

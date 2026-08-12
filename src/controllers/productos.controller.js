@@ -242,10 +242,10 @@ export async function postProducto(req, res) {
       });
     }
 
-    if (stock_apartado !== null && stock_apartado < 0) {
+    if (stock_apartado !== null && stock_apartado !== 0) {
       return res.status(400).json({
         ok: false,
-        msg: "variante_base.stock_apartado debe ser entero >= 0",
+        msg: "variante_base.stock_apartado no es editable; se gestiona mediante apartados/pedidos",
       });
     }
 
@@ -272,7 +272,7 @@ export async function postProducto(req, res) {
         precio_venta,
         precio_costo,
         stock_fisico: stock_fisico ?? 0,
-        stock_apartado: stock_apartado ?? 0,
+        stock_apartado: 0,
         stock_minimo: stockMinimoFinal,
         activo: variante_base?.activo !== false,
       },

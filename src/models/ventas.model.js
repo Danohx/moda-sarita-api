@@ -5,6 +5,11 @@ import {
 } from "./credito.model.js";
 import { calcularPlanCredito } from "../services/credito.service.js";
 import {
+  normalizeStockItems,
+  lockVariantesForUpdate,
+  assertStockDisponible,
+} from "./stock.model.js";
+import {
   validarIdempotencyKey,
   validarPayloadCreditoPOS,
 } from "../validators/credito.validator.js";
@@ -127,8 +132,16 @@ export async function crearVentaPOS(
     .trim()
     .toUpperCase();
   const idempotencyKey = validarIdempotencyKey(idempotency_key);
-  const idempotencyHash = idempotencyKey
-    ? buildPosRequestHash({
+
+  if (!idempotencyKey) {
+    const error = new Error(
+      "Idempotency-Key es requerido para registrar una venta POS.",
+    );
+    error.code = "VALIDATION";
+    throw error;
+  }
+
+  const idempotencyHash = buildPosRequestHash({
         cliente_id,
         vendedor_id,
         items,
@@ -136,10 +149,9 @@ export async function crearVentaPOS(
         costo_envio,
         cupon_id,
         metodo_pago: metodoPagoFinal,
-        referencia_externa,
-        credito,
-      })
-    : null;
+      referencia_externa,
+      credito,
+    });
   const client = await db.connect();
 
   try {
@@ -148,7 +160,7 @@ export async function crearVentaPOS(
       vendedor_id ? String(vendedor_id) : "",
     ]);
 
-    if (idempotencyKey) {
+    {
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         [`${vendedor_id}:${idempotencyKey}`],
@@ -301,62 +313,44 @@ export async function crearVentaPOS(
     const creditoInput = esPagoCredito
       ? validarPayloadCreditoPOS(credito)
       : null;
-    const normalizedItems = [];
 
-    for (const item of items) {
-      const varianteId = String(item.variante_id || "");
-      const cantidad = Number(item.cantidad);
+    const compactItems = normalizeStockItems(items);
+    const variantesMap = await lockVariantesForUpdate(
+      client,
+      compactItems.map((item) => item.variante_id),
+    );
 
-      if (!varianteId || !Number.isInteger(cantidad) || cantidad <= 0) {
-        const error = new Error(
-          "Cada item requiere variante_id y cantidad > 0",
-        );
-        error.code = "VALIDATION";
-        throw error;
-      }
+    if (variantesMap.size !== compactItems.length) {
+      const faltantes = compactItems
+        .filter((item) => !variantesMap.has(item.variante_id))
+        .map((item) => item.variante_id);
+      const error = new Error(`Variante no encontrada: ${faltantes.join(", ")}`);
+      error.code = "NOT_FOUND";
+      throw error;
+    }
 
-      const variante = await getVarianteForUpdate(client, varianteId);
+    const normalizedItems = compactItems.map((item) => {
+      const variante = variantesMap.get(item.variante_id);
+      assertStockDisponible(variante, item.cantidad);
 
-      if (!variante) {
-        const error = new Error(`Variante no encontrada: ${varianteId}`);
-        error.code = "NOT_FOUND";
-        throw error;
-      }
-
-      if (!variante.activo) {
-        const error = new Error(`La variante ${varianteId} está inactiva`);
-        error.code = "VALIDATION";
-        throw error;
-      }
-
-      const disponible =
-        Number(variante.stock_fisico) - Number(variante.stock_apartado);
-
-      if (disponible < cantidad) {
-        const error = new Error(
-          `Stock insuficiente en variante ${varianteId}. Disponible=${disponible}`,
-        );
-        error.code = "STOCK";
-        throw error;
-      }
-
-      const precioUnitario =
-        item.precio_unitario !== undefined && item.precio_unitario !== null
-          ? toMoney(item.precio_unitario)
-          : toMoney(variante.precio_venta);
+      // El precio de venta es autoridad del backend. El frontend no puede
+      // sobrescribirlo modificando el payload HTTP.
+      const precioUnitario = toMoney(variante.precio_venta);
 
       if (precioUnitario <= 0) {
-        const error = new Error("precio_unitario debe ser mayor a 0");
+        const error = new Error(
+          `La variante ${item.variante_id} no tiene un precio de venta válido.`,
+        );
         error.code = "VALIDATION";
         throw error;
       }
 
-      normalizedItems.push({
-        variante_id: varianteId,
-        cantidad,
+      return {
+        variante_id: item.variante_id,
+        cantidad: item.cantidad,
         precio_unitario: precioUnitario,
-      });
-    }
+      };
+    });
 
     const subtotal = toMoney(
       normalizedItems.reduce(
@@ -465,16 +459,26 @@ export async function crearVentaPOS(
         [pedido.id, item.variante_id, item.cantidad, item.precio_unitario],
       );
 
-      await client.query(
+      const { rows: stockRows } = await client.query(
         `
           UPDATE inventario.variantes_producto
           SET
             stock_fisico = stock_fisico - $2,
             updated_at = now()
-          WHERE id = $1
+          WHERE id = $1::uuid
+            AND (stock_fisico - stock_apartado) >= $2
+          RETURNING id, stock_fisico, stock_apartado
         `,
         [item.variante_id, item.cantidad],
       );
+
+      if (stockRows.length === 0) {
+        const error = new Error(
+          `No se pudo descontar stock de la variante ${item.variante_id}.`,
+        );
+        error.code = "STOCK";
+        throw error;
+      }
 
       await client.query(
         `
@@ -1067,6 +1071,302 @@ export async function cancelarApartado(
   }
 }
 
+export async function cancelarVentaPOS(
+  db,
+  {
+    pedido_id,
+    usuario_id,
+    motivo,
+    metodo_reembolso = null,
+    referencia_reembolso = null,
+    puede_reembolsar_cualquier_venta = false,
+  },
+) {
+  const motivoFinal = String(motivo || "").trim();
+
+  if (motivoFinal.length < 3) {
+    const error = new Error("El motivo de cancelación/devolución es requerido.");
+    error.code = "VALIDATION";
+    throw error;
+  }
+
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuario_id ? String(usuario_id) : "",
+    ]);
+
+    const { rows: corteRows } = await client.query(
+      `
+        SELECT id
+        FROM ventas.corte_caja
+        WHERE usuario_id = $1::uuid
+          AND fin_turno IS NULL
+        ORDER BY inicio_turno DESC
+        LIMIT 1
+        FOR SHARE
+      `,
+      [usuario_id],
+    );
+
+    if (!corteRows[0]) {
+      const error = new Error(
+        "Debes tener un corte de caja abierto para registrar una devolución POS.",
+      );
+      error.code = "CASH_CUT_REQUIRED";
+      throw error;
+    }
+
+    const { rows: pedidoRows } = await client.query(
+      `
+        SELECT id, folio, tipo, estado, total, vendedor_id
+        FROM ventas.pedidos
+        WHERE id = $1::uuid
+        FOR UPDATE
+      `,
+      [pedido_id],
+    );
+
+    const pedido = pedidoRows[0];
+
+    if (!pedido) {
+      const error = new Error("Venta POS no encontrada.");
+      error.code = "NOT_FOUND";
+      throw error;
+    }
+
+    if (pedido.tipo !== "PUNTO_VENTA") {
+      const error = new Error("El pedido indicado no corresponde a una venta POS.");
+      error.code = "VALIDATION";
+      throw error;
+    }
+
+    if (["CANCELADO", "DEVUELTO"].includes(String(pedido.estado))) {
+      const error = new Error("La venta ya fue cancelada o devuelta.");
+      error.code = "CONFLICT";
+      throw error;
+    }
+
+    const ventaPropia =
+      Boolean(usuario_id) &&
+      Boolean(pedido.vendedor_id) &&
+      String(pedido.vendedor_id) === String(usuario_id);
+
+    if (!ventaPropia && !puede_reembolsar_cualquier_venta) {
+      const error = new Error(
+        "Esta venta fue realizada por otro cajero. Necesitas el permiso para devolver ventas de cualquier cajero.",
+      );
+      error.code = "REFUND_SCOPE_FORBIDDEN";
+      error.vendedor_id = pedido.vendedor_id ?? null;
+      throw error;
+    }
+
+    if (pedido.estado !== "PAGADO") {
+      const error = new Error(
+        `Solo se pueden devolver ventas POS pagadas. Estado actual: ${pedido.estado}`,
+      );
+      error.code = "CONFLICT";
+      throw error;
+    }
+
+    const { rows: creditRows } = await client.query(
+      `
+        SELECT id, estado
+        FROM clientes.creditos
+        WHERE pedido_id = $1::uuid
+        LIMIT 1
+      `,
+      [pedido_id],
+    );
+
+    if (creditRows[0]) {
+      const error = new Error(
+        "Esta venta pertenece a un crédito de tienda. Cancela/revierte el crédito desde el módulo de Créditos para conservar la conciliación.",
+      );
+      error.code = "CREDIT_REFUND_REQUIRED";
+      throw error;
+    }
+
+    const { rows: detalles } = await client.query(
+      `
+        SELECT variante_id, SUM(cantidad)::int AS cantidad
+        FROM ventas.detalles_pedido
+        WHERE pedido_id = $1::uuid
+        GROUP BY variante_id
+        ORDER BY variante_id
+      `,
+      [pedido_id],
+    );
+
+    if (detalles.length === 0) {
+      const error = new Error("La venta no tiene productos para reintegrar.");
+      error.code = "CONFLICT";
+      throw error;
+    }
+
+    const variantesMap = await lockVariantesForUpdate(
+      client,
+      detalles.map((item) => item.variante_id),
+    );
+
+    if (variantesMap.size !== detalles.length) {
+      const error = new Error(
+        "Una o más variantes de la venta ya no existen; no se puede hacer una devolución automática.",
+      );
+      error.code = "CONFLICT";
+      throw error;
+    }
+
+    const { rows: pagoRows } = await client.query(
+      `
+        SELECT
+          COALESCE(
+            SUM(
+              CASE
+                WHEN concepto::text LIKE 'REEMBOLSO%' THEN -ABS(monto)
+                ELSE monto
+              END
+            ),
+            0
+          )::numeric(12,2) AS monto_neto,
+          (
+            ARRAY_AGG(metodo ORDER BY fecha_pago DESC, id DESC)
+            FILTER (WHERE concepto::text NOT LIKE 'REEMBOLSO%')
+          )[1] AS ultimo_metodo
+        FROM ventas.pagos
+        WHERE pedido_id = $1::uuid
+          AND estado = 'CONFIRMADO'
+      `,
+      [pedido_id],
+    );
+
+    const montoReembolso = toMoney(pagoRows[0]?.monto_neto ?? 0);
+
+    if (montoReembolso <= 0) {
+      const error = new Error(
+        "La venta no tiene un monto confirmado pendiente de reembolso.",
+      );
+      error.code = "CONFLICT";
+      throw error;
+    }
+
+    if (Math.abs(montoReembolso - toMoney(pedido.total)) > 0.01) {
+      const error = new Error(
+        `La venta requiere conciliación manual antes de devolverla. Total=${toMoney(pedido.total).toFixed(2)}, pagos netos=${montoReembolso.toFixed(2)}.`,
+      );
+      error.code = "PAYMENT_RECONCILIATION";
+      throw error;
+    }
+
+    const metodoReembolso = String(
+      metodo_reembolso || pagoRows[0]?.ultimo_metodo || "",
+    )
+      .trim()
+      .toUpperCase();
+
+    if (!metodoReembolso) {
+      const error = new Error("No se pudo determinar el método de reembolso.");
+      error.code = "VALIDATION";
+      throw error;
+    }
+
+    for (const detalle of detalles) {
+      const cantidad = Number(detalle.cantidad);
+
+      await client.query(
+        `
+          UPDATE inventario.variantes_producto
+          SET stock_fisico = stock_fisico + $2,
+              updated_at = now()
+          WHERE id = $1::uuid
+        `,
+        [detalle.variante_id, cantidad],
+      );
+
+      await client.query(
+        `
+          INSERT INTO inventario.movimientos (
+            variante_id,
+            usuario_id,
+            cantidad,
+            motivo,
+            tipo
+          )
+          VALUES ($1::uuid, $2::uuid, $3, $4, 'ENTRADA')
+        `,
+        [
+          detalle.variante_id,
+          usuario_id,
+          Math.abs(cantidad),
+          `DEVOLUCIÓN POS folio ${pedido.folio}: ${motivoFinal}`,
+        ],
+      );
+    }
+
+    const { rows: refundRows } = await client.query(
+      `
+        INSERT INTO ventas.pagos (
+          pedido_id,
+          monto,
+          metodo,
+          referencia_externa,
+          concepto,
+          estado,
+          usuario_id
+        )
+        VALUES (
+          $1::uuid,
+          $2,
+          $3::public.metodo_pago_enum,
+          $4,
+          'REEMBOLSO',
+          'CONFIRMADO',
+          $5::uuid
+        )
+        RETURNING id, pedido_id, monto, metodo, referencia_externa,
+                  concepto, estado, fecha_pago, usuario_id
+      `,
+      [
+        pedido_id,
+        montoReembolso,
+        metodoReembolso,
+        referencia_reembolso ? String(referencia_reembolso).trim() : null,
+        usuario_id,
+      ],
+    );
+
+    const { rows: updatedRows } = await client.query(
+      `
+        UPDATE ventas.pedidos
+        SET estado = 'DEVUELTO',
+            motivo_cancelacion = $2,
+            fecha_cancelacion = now()
+        WHERE id = $1::uuid
+        RETURNING *
+      `,
+      [pedido_id, motivoFinal],
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      venta: updatedRows[0],
+      reembolso: refundRows[0],
+      stock_reintegrado: detalles.map((item) => ({
+        variante_id: item.variante_id,
+        cantidad: Number(item.cantidad),
+      })),
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function getDesgloseMetodosCorte(
   client,
   { usuario_id, inicio_turno, fin_turno = null },
@@ -1076,7 +1376,7 @@ async function getDesgloseMetodosCorte(
     WITH pagos_turno AS (
       SELECT
         pg.metodo::text AS codigo,
-        COALESCE(SUM(pg.monto), 0)::numeric(10,2) AS total,
+        COALESCE(SUM(CASE WHEN pg.concepto::text LIKE 'REEMBOLSO%' THEN -ABS(pg.monto) ELSE pg.monto END), 0)::numeric(10,2) AS total,
         COUNT(*)::int AS operaciones
       FROM ventas.pagos pg
       LEFT JOIN ventas.pedidos pe ON pe.id = pg.pedido_id
@@ -1558,6 +1858,9 @@ export async function listarHistorialVentas(
       COALESCE(
         SUM(
           CASE
+            WHEN pg.estado = 'CONFIRMADO'
+              AND pg.concepto::text LIKE 'REEMBOLSO%'
+              THEN -ABS(pg.monto)
             WHEN pg.estado = 'CONFIRMADO' THEN pg.monto
             ELSE 0
           END

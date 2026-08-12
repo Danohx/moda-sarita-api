@@ -1,7 +1,11 @@
 import { Router } from "express";
 import { body, param, validationResult } from "express-validator";
 import { useInternalDb } from "../middleware/dbContext.js";
-import { requireAuth, requireRole } from "../middleware/seguridad.js";
+import {
+  requireAuth,
+  requireAnyPermission,
+  requirePermission,
+} from "../middleware/seguridad.js";
 import {
   getPedidosAdmin,
   getPedidoByIdAdmin,
@@ -32,14 +36,27 @@ function validar(req, res, next) {
   next();
 }
 
-router.use(useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"));
+router.use(useInternalDb, requireAuth);
 
-router.get("/", getPedidosAdmin);
-router.post("/vencer-expirados", postVencerApartadosExpirados);
-router.get("/vencer-expirados", postVencerApartadosExpirados);
+router.get(
+  "/",
+  requireAnyPermission("ventas.pedidos.read", "ventas.apartados.read"),
+  getPedidosAdmin,
+);
+router.post(
+  "/vencer-expirados",
+  requireAnyPermission("ventas.apartados.cancel", "ventas.pedidos.update"),
+  postVencerApartadosExpirados,
+);
+router.get(
+  "/vencer-expirados",
+  requireAnyPermission("ventas.apartados.cancel", "ventas.pedidos.update"),
+  postVencerApartadosExpirados,
+);
 
 router.post(
   "/:id/confirmar-pago-web",
+  requirePermission("ventas.pedidos.update"),
   param("id").isUUID(),
   body("referencia_externa")
     .optional({ nullable: true })
@@ -49,18 +66,51 @@ router.post(
 );
 router.post(
   "/:id/cancelar-web",
+  requirePermission("ventas.pedidos.cancel"),
   param("id").isUUID(),
   body("motivo_cancelacion").trim().isLength({ min: 3, max: 500 }),
   validar,
   postCancelarPedidoWeb,
 );
 
-router.get("/:id", getPedidoByIdAdmin);
-router.get("/:id/ticket", getPedidoTicketPdf);
-router.get("/:id/pagos/:pagoId/ticket", getPagoTicketPdf);
-router.post("/:id/abonos", postAbonoApartado);
-router.post("/:id/cancelar", postCancelarApartado);
-router.post("/:id/liquidar", postLiquidarApartado);
-router.patch("/:id/estado-web", patchEstadoPedidoWeb);
+router.get(
+  "/:id",
+  requireAnyPermission("ventas.pedidos.read", "ventas.apartados.read"),
+  getPedidoByIdAdmin,
+);
+router.get(
+  "/:id/ticket",
+  requireAnyPermission(
+    "ventas.pedidos.read",
+    "ventas.apartados.read",
+    "ventas.pos.ticket.read",
+  ),
+  getPedidoTicketPdf,
+);
+router.get(
+  "/:id/pagos/:pagoId/ticket",
+  requireAnyPermission("ventas.pagos.read", "ventas.apartados.read"),
+  getPagoTicketPdf,
+);
+router.post(
+  "/:id/abonos",
+  requireAnyPermission("ventas.apartados.abono", "ventas.pedidos.update"),
+  postAbonoApartado,
+);
+router.post(
+  "/:id/cancelar",
+  requireAnyPermission("ventas.apartados.cancel", "ventas.pedidos.cancel"),
+  postCancelarApartado,
+);
+router.post(
+  "/:id/liquidar",
+  requireAnyPermission("ventas.apartados.liquidar", "ventas.pedidos.update"),
+  postLiquidarApartado,
+);
+router.patch(
+  "/:id/estado-web",
+  requirePermission("ventas.pedidos.update"),
+  patchEstadoPedidoWeb,
+);
 
 export default router;

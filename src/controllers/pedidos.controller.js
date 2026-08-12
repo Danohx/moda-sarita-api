@@ -226,7 +226,8 @@ export async function postCancelarApartado(req, res) {
       });
     }
 
-    const { motivo_cancelacion } = req.body || {};
+    const { motivo_cancelacion, reembolso = { modo: "NINGUNO" } } =
+      req.body || {};
 
     const motivo = String(motivo_cancelacion || "").trim();
 
@@ -237,14 +238,47 @@ export async function postCancelarApartado(req, res) {
       });
     }
 
-    const data = await cancelarApartado(req.db, pedidoId, {
+    const modoReembolso = String(reembolso?.modo || "NINGUNO")
+      .trim()
+      .toUpperCase();
+
+    if (!["NINGUNO", "TOTAL", "PARCIAL"].includes(modoReembolso)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Modo de reembolso inválido",
+      });
+    }
+
+    if (
+      modoReembolso !== "NINGUNO" &&
+      reembolso?.metodo &&
+      !METODOS_PAGO_VALIDOS.has(String(reembolso.metodo).toUpperCase())
+    ) {
+      return res.status(400).json({
+        ok: false,
+        message: "Método de reembolso inválido",
+      });
+    }
+
+    const result = await cancelarApartado(req.db, pedidoId, {
       motivo_cancelacion: motivo,
+      usuario_id: req.user?.id ?? null,
+      reembolso: {
+        modo: modoReembolso,
+        monto: reembolso?.monto ?? null,
+        metodo: reembolso?.metodo
+          ? String(reembolso.metodo).toUpperCase()
+          : null,
+        referencia_externa: reembolso?.referencia_externa ?? null,
+      },
     });
 
     return res.json({
       ok: true,
       message: "Apartado cancelado correctamente",
-      data,
+      data: result.detalle,
+      reembolso_generado: result.reembolso_generado,
+      politica_reembolso: result.politica_reembolso,
     });
   } catch (err) {
     if (err.code === "22P02") {

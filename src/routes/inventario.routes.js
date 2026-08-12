@@ -1,6 +1,10 @@
 import { Router } from "express";
 import { useInternalDb } from "../middleware/dbContext.js";
-import { requireAuth, requireRole } from "../middleware/seguridad.js";
+import {
+  requireAuth,
+  requireAnyPermission,
+  requirePermission,
+} from "../middleware/seguridad.js";
 import {
   getExistencias,
   getStockVariante,
@@ -12,13 +16,40 @@ import {
 
 const router = Router();
 
-router.use(useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"));
+router.use(useInternalDb, requireAuth);
 
-router.get("/alertas", getAlertasInventarioController)
-router.get("/existencias", getExistencias);
-router.get("/variantes/:id/stock", getStockVariante);
-router.get("/variantes/:id/movimientos", getKardexVariante);
-router.get("/productos/:id/movimientos", getKardexProducto);
-router.post("/movimientos", postMovimientoInventario);
+router.get(
+  "/alertas",
+  requireAnyPermission(
+    "inventario.productos.read",
+    "inventario.movimientos.read",
+  ),
+  getAlertasInventarioController,
+);
+router.get(
+  "/existencias",
+  requirePermission("inventario.productos.read"),
+  getExistencias,
+);
+router.get(
+  "/variantes/:id/stock",
+  requirePermission("inventario.productos.read"),
+  getStockVariante,
+);
+router.get(
+  "/variantes/:id/movimientos",
+  requirePermission("inventario.movimientos.read"),
+  getKardexVariante,
+);
+router.get(
+  "/productos/:id/movimientos",
+  requirePermission("inventario.movimientos.read"),
+  getKardexProducto,
+);
+router.post(
+  "/movimientos",
+  requirePermission("inventario.movimientos.create"),
+  postMovimientoInventario,
+);
 
 export default router;

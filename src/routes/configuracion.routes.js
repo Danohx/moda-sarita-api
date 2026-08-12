@@ -4,8 +4,8 @@ import { Router } from "express";
 import { useInternalDb, usePublicDb } from "../middleware/dbContext.js";
 import {
   requireAuth,
+  requireAnyPermission,
   requirePermission,
-  requireRole,
 } from "../middleware/seguridad.js";
 
 import {
@@ -29,7 +29,7 @@ router.get(
   "/pos/metodos-pago",
   useInternalDb,
   requireAuth,
-  requireRole("ADMIN", "EMPLEADO"),
+  requireAnyPermission("ventas.pos.create", "ventas.pedidos.create"),
   getMetodosPagoPOS,
 );
 

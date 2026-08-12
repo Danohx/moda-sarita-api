@@ -1,6 +1,10 @@
 import { Router } from "express";
 import { usePublicDb, useInternalDb } from "../middleware/dbContext.js";
-import { requireAuth, requireRole } from "../middleware/seguridad.js";
+import {
+  requireAuth,
+  requireAnyPermission,
+  requirePermission,
+} from "../middleware/seguridad.js";
 import {
   getCategorias,
   postCategoria,
@@ -12,10 +16,37 @@ import {
 const router = Router();
 
 router.get("/", usePublicDb, getCategorias);
-router.get("/admin/list", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), getCategoriasAdmin);
+router.get(
+  "/admin/list",
+  useInternalDb,
+  requireAuth,
+  requirePermission("inventario.categorias.read"),
+  getCategoriasAdmin,
+);
 
-router.post("/", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), postCategoria);
-router.patch("/:id", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), patchCategoria);
-router.patch("/:id/status", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), patchCategoriaStatus);
+router.post(
+  "/",
+  useInternalDb,
+  requireAuth,
+  requirePermission("inventario.categorias.create"),
+  postCategoria,
+);
+router.patch(
+  "/:id",
+  useInternalDb,
+  requireAuth,
+  requirePermission("inventario.categorias.update"),
+  patchCategoria,
+);
+router.patch(
+  "/:id/status",
+  useInternalDb,
+  requireAuth,
+  requireAnyPermission(
+    "inventario.categorias.update",
+    "inventario.categorias.delete",
+  ),
+  patchCategoriaStatus,
+);
 
 export default router;

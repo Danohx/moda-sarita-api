@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { useInternalDb } from "../middleware/dbContext.js";
-import { requireAuth, requireRole } from "../middleware/seguridad.js";
+import { requireAuth, requirePermission } from "../middleware/seguridad.js";
 import {
   getVariante,
   patchVarianteStock,
@@ -10,9 +10,33 @@ import {
 
 const router = Router();
 
-router.get("/:id", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), getVariante);
-router.patch("/:id", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), patchVariante);
-router.patch("/:id/stock", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), patchVarianteStock);
-router.patch("/:id/status", useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"), patchVarianteStatus);
+router.get(
+  "/:id",
+  useInternalDb,
+  requireAuth,
+  requirePermission("inventario.productos.read"),
+  getVariante,
+);
+router.patch(
+  "/:id",
+  useInternalDb,
+  requireAuth,
+  requirePermission("inventario.productos.update"),
+  patchVariante,
+);
+router.patch(
+  "/:id/stock",
+  useInternalDb,
+  requireAuth,
+  requirePermission("inventario.movimientos.create"),
+  patchVarianteStock,
+);
+router.patch(
+  "/:id/status",
+  useInternalDb,
+  requireAuth,
+  requirePermission("inventario.productos.update"),
+  patchVarianteStatus,
+);
 
 export default router;

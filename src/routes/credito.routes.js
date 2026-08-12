@@ -2,8 +2,8 @@ import { Router } from "express";
 import { useInternalDb } from "../middleware/dbContext.js";
 import {
   requireAuth,
+  requireAnyPermission,
   requirePermission,
-  requireRole,
 } from "../middleware/seguridad.js";
 import {
   getComprobantePagoCreditoPdf,
@@ -25,23 +25,8 @@ import {
 
 const router = Router();
 
-function requireAnyPermission(...permissions) {
-  return (req, res, next) => {
-    const available = new Set(req.user?.permisos || []);
-    if (permissions.some((permission) => available.has(permission))) {
-      return next();
-    }
 
-    return res.status(403).json({
-      ok: false,
-      message: "No autorizado (permiso)",
-      requiredAny: permissions,
-      rol: req.user?.rol || null,
-    });
-  };
-}
-
-router.use(useInternalDb, requireAuth, requireRole("ADMIN", "EMPLEADO"));
+router.use(useInternalDb, requireAuth);
 
 router.post(
   "/simular",

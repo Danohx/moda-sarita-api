@@ -280,6 +280,18 @@ export async function createMovimientoAndApply(
       throw e;
     }
 
+    const stockApartado = Number(v.stock_apartado || 0);
+    if (nuevoStock < stockApartado) {
+      const e = new Error(
+        `No puedes dejar stock_fisico en ${nuevoStock}: existen ${stockApartado} unidades apartadas.`,
+      );
+      e.code = "STOCK_RESERVADO";
+      throw e;
+    }
+
+
+
+
     await client.query(
       `
       INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo, tipo)

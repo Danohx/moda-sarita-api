@@ -1,3 +1,9 @@
+import {
+  normalizeStockItems,
+  lockVariantesForUpdate,
+  assertStockDisponible,
+} from "./stock.model.js";
+
 export async function listPedidosAdmin(
   db,
   { tipo = null, estado = null, cliente_id = null, q = null, limit = 50, offset = 0 } = {},
@@ -21,8 +27,35 @@ export async function listPedidosAdmin(
       vpr.fecha_cancelacion,
       vpr.liquidado_at,
       vpr.observaciones,
-      vpr.total_pagado,
-      vpr.saldo_pendiente,
+      COALESCE((
+        SELECT SUM(
+          CASE
+            WHEN pg.estado = 'CONFIRMADO' AND pg.concepto::text LIKE 'REEMBOLSO%'
+              THEN -ABS(pg.monto)
+            WHEN pg.estado = 'CONFIRMADO'
+              THEN pg.monto
+            ELSE 0
+          END
+        )
+        FROM ventas.pagos pg
+        WHERE pg.pedido_id = vpr.id
+      ), 0)::numeric(12,2) AS total_pagado,
+      GREATEST(
+        vpr.total - COALESCE((
+          SELECT SUM(
+            CASE
+              WHEN pg.estado = 'CONFIRMADO' AND pg.concepto::text LIKE 'REEMBOLSO%'
+                THEN -ABS(pg.monto)
+              WHEN pg.estado = 'CONFIRMADO'
+                THEN pg.monto
+              ELSE 0
+            END
+          )
+          FROM ventas.pagos pg
+          WHERE pg.pedido_id = vpr.id
+        ), 0),
+        0
+      )::numeric(12,2) AS saldo_pendiente,
       (
         SELECT COALESCE(SUM(d.cantidad), 0)
         FROM ventas.detalles_pedido d
@@ -79,8 +112,35 @@ export async function getPedidoResumenById(db, id) {
       vpr.fecha_cancelacion,
       vpr.liquidado_at,
       vpr.observaciones,
-      vpr.total_pagado,
-      vpr.saldo_pendiente
+      COALESCE((
+        SELECT SUM(
+          CASE
+            WHEN pg.estado = 'CONFIRMADO' AND pg.concepto::text LIKE 'REEMBOLSO%'
+              THEN -ABS(pg.monto)
+            WHEN pg.estado = 'CONFIRMADO'
+              THEN pg.monto
+            ELSE 0
+          END
+        )
+        FROM ventas.pagos pg
+        WHERE pg.pedido_id = vpr.id
+      ), 0)::numeric(12,2) AS total_pagado,
+      GREATEST(
+        vpr.total - COALESCE((
+          SELECT SUM(
+            CASE
+              WHEN pg.estado = 'CONFIRMADO' AND pg.concepto::text LIKE 'REEMBOLSO%'
+                THEN -ABS(pg.monto)
+              WHEN pg.estado = 'CONFIRMADO'
+                THEN pg.monto
+              ELSE 0
+            END
+          )
+          FROM ventas.pagos pg
+          WHERE pg.pedido_id = vpr.id
+        ), 0),
+        0
+      )::numeric(12,2) AS saldo_pendiente
     FROM ventas.v_pedidos_resumen vpr
     LEFT JOIN seguridad.usuarios u ON u.id = vpr.vendedor_id
     WHERE vpr.id = $1;
@@ -184,6 +244,223 @@ function createModelError(message, status = 400) {
   return error;
 }
 
+export async function crearApartado(
+  db,
+  {
+    cliente_id,
+    vendedor_id,
+    items,
+    fecha_limite_apartado,
+    anticipo = 0,
+    metodo_pago = null,
+    referencia_externa = null,
+  },
+) {
+  if (!cliente_id) {
+    throw createModelError("cliente_id requerido para apartado", 400);
+  }
+
+  const compactItems = normalizeStockItems(items);
+  const anticipoNum = Number(anticipo || 0);
+
+  if (!Number.isFinite(anticipoNum) || anticipoNum < 0) {
+    throw createModelError("El anticipo no puede ser negativo", 400);
+  }
+
+  if (!fecha_limite_apartado) {
+    throw createModelError("fecha_limite_apartado es requerida", 400);
+  }
+
+  const client = await db.connect();
+  let committed = false;
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      vendedor_id ? String(vendedor_id) : "",
+    ]);
+
+    const { rows: clienteRows } = await client.query(
+      `
+        SELECT id, puede_apartar, activo
+        FROM clientes.clientes
+        WHERE id = $1::uuid
+        FOR UPDATE
+      `,
+      [cliente_id],
+    );
+
+    const cliente = clienteRows[0];
+
+    if (!cliente) {
+      throw createModelError("Cliente no encontrado", 404);
+    }
+
+    if (cliente.activo === false) {
+      throw createModelError("El cliente está inactivo", 409);
+    }
+
+    if (cliente.puede_apartar !== true) {
+      throw createModelError("El cliente no está autorizado para apartados", 403);
+    }
+
+    const variantesMap = await lockVariantesForUpdate(
+      client,
+      compactItems.map((item) => item.variante_id),
+    );
+
+    if (variantesMap.size !== compactItems.length) {
+      const faltantes = compactItems
+        .filter((item) => !variantesMap.has(item.variante_id))
+        .map((item) => item.variante_id);
+      throw createModelError(
+        `Variante no encontrada: ${faltantes.join(", ")}`,
+        404,
+      );
+    }
+
+    const normalizedItems = compactItems.map((item) => {
+      const variante = variantesMap.get(item.variante_id);
+      assertStockDisponible(variante, item.cantidad);
+
+      const precio = Number(variante.precio_venta);
+      if (!Number.isFinite(precio) || precio <= 0) {
+        throw createModelError(
+          `La variante ${item.variante_id} no tiene un precio de venta válido`,
+          400,
+        );
+      }
+
+      return {
+        variante_id: item.variante_id,
+        cantidad: item.cantidad,
+        precio_unitario: Math.round(precio * 100) / 100,
+      };
+    });
+
+    const subtotal =
+      Math.round(
+        normalizedItems.reduce(
+          (sum, item) => sum + item.precio_unitario * item.cantidad,
+          0,
+        ) * 100,
+      ) / 100;
+
+    if (anticipoNum > subtotal) {
+      throw createModelError("El anticipo no puede ser mayor al total", 400);
+    }
+
+    if (anticipoNum > 0 && !metodo_pago) {
+      throw createModelError("metodo_pago requerido cuando hay anticipo", 400);
+    }
+
+    const { rows: pedidoRows } = await client.query(
+      `
+        INSERT INTO ventas.pedidos (
+          cliente_id,
+          vendedor_id,
+          tipo,
+          estado,
+          subtotal,
+          descuento,
+          costo_envio,
+          total,
+          fecha_limite_apartado
+        )
+        VALUES ($1::uuid, $2::uuid, 'APARTADO', 'ACTIVO', $3, 0, 0, $3, $4)
+        RETURNING *
+      `,
+      [cliente_id, vendedor_id, subtotal, fecha_limite_apartado],
+    );
+
+    const pedido = pedidoRows[0];
+
+    for (const item of normalizedItems) {
+      await client.query(
+        `
+          INSERT INTO ventas.detalles_pedido (
+            pedido_id,
+            variante_id,
+            cantidad,
+            precio_unitario
+          )
+          VALUES ($1::uuid, $2::uuid, $3, $4)
+        `,
+        [pedido.id, item.variante_id, item.cantidad, item.precio_unitario],
+      );
+
+      const { rows: stockRows } = await client.query(
+        `
+          UPDATE inventario.variantes_producto
+          SET stock_apartado = stock_apartado + $2,
+              updated_at = now()
+          WHERE id = $1::uuid
+            AND (stock_fisico - stock_apartado) >= $2
+          RETURNING id, stock_fisico, stock_apartado
+        `,
+        [item.variante_id, item.cantidad],
+      );
+
+      if (stockRows.length === 0) {
+        throw createModelError(
+          `No se pudo reservar stock para la variante ${item.variante_id}`,
+          409,
+        );
+      }
+    }
+
+    let pagoGenerado = null;
+
+    if (anticipoNum > 0) {
+      const { rows } = await client.query(
+        `
+          INSERT INTO ventas.pagos (
+            pedido_id,
+            monto,
+            metodo,
+            referencia_externa,
+            concepto,
+            estado,
+            usuario_id
+          )
+          VALUES (
+            $1::uuid,
+            $2,
+            $3::public.metodo_pago_enum,
+            $4,
+            'ANTICIPO_APARTADO',
+            'CONFIRMADO',
+            $5::uuid
+          )
+          RETURNING id, pedido_id, monto, metodo, referencia_externa,
+                    concepto, estado, fecha_pago, usuario_id
+        `,
+        [
+          pedido.id,
+          Math.round(anticipoNum * 100) / 100,
+          String(metodo_pago).trim().toUpperCase(),
+          referencia_externa ? String(referencia_externa).trim() : null,
+          vendedor_id,
+        ],
+      );
+      pagoGenerado = rows[0] || null;
+    }
+
+    await client.query("COMMIT");
+    committed = true;
+
+    return {
+      ...pedido,
+      pago_generado: pagoGenerado,
+    };
+  } catch (err) {
+    if (!committed) await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function registrarAbonoApartado(
   db,
   pedidoId,
@@ -194,6 +471,9 @@ export async function registrarAbonoApartado(
 
   try {
     await client.query("BEGIN");
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuario_id ? String(usuario_id) : "",
+    ]);
 
     const pedidoSql = `
       SELECT id, folio, tipo, estado, total
@@ -306,17 +586,28 @@ export async function registrarAbonoApartado(
   }
 }
 
-export async function cancelarApartado(db, pedidoId, { motivo_cancelacion }) {
+export async function cancelarApartado(
+  db,
+  pedidoId,
+  {
+    motivo_cancelacion,
+    usuario_id = null,
+    reembolso = { modo: "NINGUNO" },
+  },
+) {
   const client = await db.connect();
   let committed = false;
 
   try {
     await client.query("BEGIN");
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuario_id ? String(usuario_id) : "",
+    ]);
 
     const pedidoSql = `
-      SELECT id, folio, tipo, estado
+      SELECT id, folio, tipo, estado, total
       FROM ventas.pedidos
-      WHERE id = $1
+      WHERE id = $1::uuid
       FOR UPDATE;
     `;
 
@@ -338,37 +629,33 @@ export async function cancelarApartado(db, pedidoId, { motivo_cancelacion }) {
       );
     }
 
-    const detallesSql = `
-      SELECT
-        variante_id,
-        SUM(cantidad)::int AS cantidad
-      FROM ventas.detalles_pedido
-      WHERE pedido_id = $1
-      GROUP BY variante_id;
-    `;
+    const motivo = String(motivo_cancelacion || "").trim();
+    if (motivo.length < 3) {
+      throw createModelError("El motivo de cancelación es requerido", 400);
+    }
 
-    const detallesResult = await client.query(detallesSql, [pedidoId]);
+    const detallesResult = await client.query(
+      `
+        SELECT variante_id, SUM(cantidad)::int AS cantidad
+        FROM ventas.detalles_pedido
+        WHERE pedido_id = $1::uuid
+        GROUP BY variante_id
+        ORDER BY variante_id;
+      `,
+      [pedidoId],
+    );
     const detalles = detallesResult.rows;
 
     if (detalles.length === 0) {
       throw createModelError("El apartado no tiene productos registrados", 409);
     }
 
-    const varianteIds = detalles.map((detalle) => detalle.variante_id);
-
-    const variantesSql = `
-      SELECT id, stock_apartado
-      FROM inventario.variantes_producto
-      WHERE id = ANY($1::uuid[])
-      FOR UPDATE;
-    `;
-
-    const variantesResult = await client.query(variantesSql, [varianteIds]);
-    const variantesMap = new Map(
-      variantesResult.rows.map((variante) => [variante.id, variante]),
+    const variantesMap = await lockVariantesForUpdate(
+      client,
+      detalles.map((detalle) => detalle.variante_id),
     );
 
-    if (variantesResult.rows.length !== varianteIds.length) {
+    if (variantesMap.size !== detalles.length) {
       throw createModelError(
         "Una o más variantes del apartado no existen",
         409,
@@ -376,7 +663,7 @@ export async function cancelarApartado(db, pedidoId, { motivo_cancelacion }) {
     }
 
     for (const detalle of detalles) {
-      const variante = variantesMap.get(detalle.variante_id);
+      const variante = variantesMap.get(String(detalle.variante_id));
       const stockApartado = Number(variante.stock_apartado);
       const cantidad = Number(detalle.cantidad);
 
@@ -388,35 +675,150 @@ export async function cancelarApartado(db, pedidoId, { motivo_cancelacion }) {
       }
     }
 
-    const updatePedidoSql = `
-      UPDATE ventas.pedidos
-      SET
-        estado = 'CANCELADO',
-        motivo_cancelacion = $2,
-        fecha_cancelacion = now()
-      WHERE id = $1
-      RETURNING id, folio, estado, motivo_cancelacion, fecha_cancelacion;
-    `;
+    const { rows: pagosRows } = await client.query(
+      `
+        SELECT
+          COALESCE(
+            SUM(
+              CASE
+                WHEN concepto::text LIKE 'REEMBOLSO%' THEN -ABS(monto)
+                ELSE monto
+              END
+            ),
+            0
+          )::numeric(12,2) AS total_pagado_neto,
+          (
+            ARRAY_AGG(metodo ORDER BY fecha_pago DESC, id DESC)
+            FILTER (WHERE concepto::text NOT LIKE 'REEMBOLSO%')
+          )[1] AS ultimo_metodo
+        FROM ventas.pagos
+        WHERE pedido_id = $1::uuid
+          AND estado = 'CONFIRMADO'
+      `,
+      [pedidoId],
+    );
 
-    await client.query(updatePedidoSql, [pedidoId, motivo_cancelacion]);
+    const totalPagadoNeto = Number(pagosRows[0]?.total_pagado_neto ?? 0);
+    const modoReembolso = String(reembolso?.modo || "NINGUNO")
+      .trim()
+      .toUpperCase();
+
+    if (!["NINGUNO", "TOTAL", "PARCIAL"].includes(modoReembolso)) {
+      throw createModelError(
+        "reembolso.modo debe ser NINGUNO, TOTAL o PARCIAL",
+        400,
+      );
+    }
+
+    let montoReembolso = 0;
+
+    if (modoReembolso === "TOTAL") {
+      montoReembolso = totalPagadoNeto;
+    } else if (modoReembolso === "PARCIAL") {
+      montoReembolso = Number(reembolso?.monto);
+
+      if (!Number.isFinite(montoReembolso) || montoReembolso <= 0) {
+        throw createModelError(
+          "El monto de reembolso parcial debe ser mayor a 0",
+          400,
+        );
+      }
+    }
+
+    montoReembolso = Math.round(montoReembolso * 100) / 100;
+
+    if (montoReembolso > totalPagadoNeto) {
+      throw createModelError(
+        `El reembolso no puede exceder lo pagado ($${totalPagadoNeto.toFixed(2)})`,
+        400,
+      );
+    }
+
+    if (montoReembolso > 0 && totalPagadoNeto <= 0) {
+      throw createModelError(
+        "El apartado no tiene pagos confirmados disponibles para reembolsar",
+        409,
+      );
+    }
+
+    let reembolsoGenerado = null;
+
+    if (montoReembolso > 0) {
+      const metodoReembolso = String(
+        reembolso?.metodo || pagosRows[0]?.ultimo_metodo || "",
+      )
+        .trim()
+        .toUpperCase();
+
+      if (!metodoReembolso) {
+        throw createModelError(
+          "Debes indicar el método usado para el reembolso",
+          400,
+        );
+      }
+
+      const { rows } = await client.query(
+        `
+          INSERT INTO ventas.pagos (
+            pedido_id,
+            monto,
+            metodo,
+            referencia_externa,
+            concepto,
+            estado,
+            usuario_id
+          )
+          VALUES (
+            $1::uuid,
+            $2,
+            $3::public.metodo_pago_enum,
+            $4,
+            'REEMBOLSO',
+            'CONFIRMADO',
+            $5::uuid
+          )
+          RETURNING id, pedido_id, monto, metodo, referencia_externa,
+                    concepto, estado, fecha_pago, usuario_id
+        `,
+        [
+          pedidoId,
+          montoReembolso,
+          metodoReembolso,
+          reembolso?.referencia_externa
+            ? String(reembolso.referencia_externa).trim()
+            : null,
+          usuario_id,
+        ],
+      );
+
+      reembolsoGenerado = rows[0] || null;
+    }
+
+    await client.query(
+      `
+        UPDATE ventas.pedidos
+        SET estado = 'CANCELADO',
+            motivo_cancelacion = $2,
+            fecha_cancelacion = now()
+        WHERE id = $1::uuid
+      `,
+      [pedidoId, motivo],
+    );
 
     for (const detalle of detalles) {
-      const updateStockSql = `
-        UPDATE inventario.variantes_producto
-        SET
-          stock_apartado = stock_apartado - $2,
-          updated_at = now()
-        WHERE id = $1
-          AND stock_apartado >= $2
-        RETURNING id, stock_fisico, stock_apartado;
-      `;
+      const { rows: stockRows } = await client.query(
+        `
+          UPDATE inventario.variantes_producto
+          SET stock_apartado = stock_apartado - $2,
+              updated_at = now()
+          WHERE id = $1::uuid
+            AND stock_apartado >= $2
+          RETURNING id, stock_fisico, stock_apartado;
+        `,
+        [detalle.variante_id, Number(detalle.cantidad)],
+      );
 
-      const stockResult = await client.query(updateStockSql, [
-        detalle.variante_id,
-        Number(detalle.cantidad),
-      ]);
-
-      if (stockResult.rows.length === 0) {
+      if (stockRows.length === 0) {
         throw createModelError(
           `No se pudo liberar stock apartado para la variante ${detalle.variante_id}`,
           409,
@@ -427,7 +829,18 @@ export async function cancelarApartado(db, pedidoId, { motivo_cancelacion }) {
     await client.query("COMMIT");
     committed = true;
 
-    return await getPedidoDetalleAdmin(client, pedidoId);
+    const detalle = await getPedidoDetalleAdmin(client, pedidoId);
+
+    return {
+      detalle,
+      reembolso_generado: reembolsoGenerado,
+      politica_reembolso: {
+        modo: modoReembolso,
+        total_pagado_neto: totalPagadoNeto,
+        monto_reembolsado: montoReembolso,
+        monto_retenido: Math.max(0, totalPagadoNeto - montoReembolso),
+      },
+    };
   } catch (err) {
     if (!committed) {
       await client.query("ROLLBACK");
@@ -449,6 +862,9 @@ export async function liquidarApartado(
 
   try {
     await client.query("BEGIN");
+    await client.query("SELECT set_config('app.user_id', $1, true)", [
+      usuario_id ? String(usuario_id) : "",
+    ]);
 
     const pedidoSql = `
       SELECT id, folio, tipo, estado, total
@@ -503,6 +919,7 @@ export async function liquidarApartado(
         stock_apartado
       FROM inventario.variantes_producto
       WHERE id = ANY($1::uuid[])
+      ORDER BY id
       FOR UPDATE;
     `;
 
@@ -686,6 +1103,7 @@ export async function vencerApartadosExpirados(db) {
       WHERE tipo = 'APARTADO'
         AND estado = 'ACTIVO'
         AND fecha_limite_apartado < CURRENT_DATE
+      ORDER BY id
       FOR UPDATE;
     `;
 
@@ -724,6 +1142,7 @@ export async function vencerApartadosExpirados(db) {
         SELECT id, stock_apartado
         FROM inventario.variantes_producto
         WHERE id = ANY($1::uuid[])
+        ORDER BY id
         FOR UPDATE;
       `;
 

@@ -89,7 +89,7 @@ export async function patchVarianteStock(req, res) {
       return res.status(404).json({ ok: false, msg: err.message });
     }
 
-    if (err.code === "STOCK_NEGATIVO") {
+    if (["STOCK_NEGATIVO", "STOCK_RESERVADO"].includes(err.code)) {
       return res.status(409).json({ ok: false, msg: err.message });
     }
 
@@ -228,10 +228,10 @@ export async function postVariantesProducto(req, res) {
         });
       }
 
-      if (stock_apartado !== null && stock_apartado < 0) {
+      if (stock_apartado !== null && stock_apartado !== 0) {
         return res.status(400).json({
           ok: false,
-          msg: "stock_apartado debe ser entero >= 0",
+          msg: "stock_apartado no es editable; se gestiona mediante apartados/pedidos",
         });
       }
 
@@ -251,7 +251,7 @@ export async function postVariantesProducto(req, res) {
         precio_venta,
         precio_costo,
         stock_fisico: stock_fisico ?? 0,
-        stock_apartado: stock_apartado ?? 0,
+        stock_apartado: 0,
         stock_minimo: stockMinimoFinal,
         activo: it?.activo !== false,
       });

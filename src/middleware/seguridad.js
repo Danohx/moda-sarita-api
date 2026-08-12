@@ -178,3 +178,23 @@ export function requirePermission(...perms) {
     next();
   };
 }
+
+export function requireAnyPermission(...perms) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ message: "No autenticado" });
+
+    const userPerms = new Set(req.user.permisos || []);
+    const ok = perms.some((p) => userPerms.has(p));
+
+    if (!ok) {
+      return res.status(403).json({
+        message: "No autorizado (permiso)",
+        requiredAny: perms,
+        rol: req.user.rol,
+      });
+    }
+    next();
+  };
+}
+
+

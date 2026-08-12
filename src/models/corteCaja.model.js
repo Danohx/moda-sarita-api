@@ -63,7 +63,12 @@ async function obtenerMetodosCobrados(
       WITH pagos_turno AS (
         SELECT
           pg.metodo::text AS codigo,
-          COALESCE(SUM(pg.monto), 0)::numeric(12,2) AS total,
+          COALESCE(SUM(
+            CASE
+              WHEN pg.concepto::text LIKE 'REEMBOLSO%' THEN -ABS(pg.monto)
+              ELSE pg.monto
+            END
+          ), 0)::numeric(12,2) AS total,
           COUNT(*)::integer AS operaciones
         FROM ventas.pagos pg
         LEFT JOIN ventas.pedidos pe ON pe.id = pg.pedido_id
@@ -154,7 +159,12 @@ async function obtenerConceptosCobrados(
           ELSE INITCAP(REPLACE(pg.concepto::text, '_', ' '))
         END AS nombre,
         COUNT(*)::integer AS operaciones,
-        COALESCE(SUM(pg.monto), 0)::numeric(12,2) AS total
+        COALESCE(SUM(
+          CASE
+            WHEN pg.concepto::text LIKE 'REEMBOLSO%' THEN -ABS(pg.monto)
+            ELSE pg.monto
+          END
+        ), 0)::numeric(12,2) AS total
       FROM ventas.pagos pg
       LEFT JOIN ventas.pedidos pe ON pe.id = pg.pedido_id
       LEFT JOIN configuracion.metodos_pago mp ON mp.codigo = pg.metodo

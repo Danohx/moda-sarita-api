@@ -68,6 +68,15 @@ export async function adjustStockVariante(
       throw err;
     }
 
+    const reservado = Number(found[0].stock_apartado || 0);
+    if (nuevo < reservado) {
+      const err = new Error(
+        `No puedes reducir el stock físico a ${nuevo}: hay ${reservado} unidades apartadas.`,
+      );
+      err.code = "STOCK_RESERVADO";
+      throw err;
+    }
+
     const { rows: updatedRows } = await client.query(
       `
       UPDATE inventario.variantes_producto
@@ -191,7 +200,7 @@ export async function createVariante(db, payload) {
     precio_venta,
     precio_costo = null,
     stock_fisico = 0,
-    stock_apartado = 0,
+    stock_apartado: _stock_apartado_ignorado = 0,
     stock_minimo = 5,
     activo = true,
   } = payload;
@@ -239,7 +248,7 @@ export async function createVariante(db, payload) {
     precio_venta,
     precio_costo,
     stock_fisico,
-    stock_apartado,
+    0,
     stock_minimo,
     activo,
   ]);
