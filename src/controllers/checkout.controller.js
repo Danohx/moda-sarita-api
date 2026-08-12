@@ -51,9 +51,11 @@ export async function postPedidoWeb(req, res) {
       ok: true,
       msg: data.replayed
         ? "El pedido ya había sido procesado."
-        : data.estado === "PAGADO"
-          ? "Pedido creado y pagado correctamente."
-          : "Pedido creado. El pago está pendiente de confirmación.",
+        : data.pago_estado === "ENGANCHE_PENDIENTE"
+          ? "Pedido reservado. El enganche por transferencia está pendiente de confirmación."
+          : data.estado === "PAGADO"
+            ? "Pedido creado y pagado correctamente."
+            : "Pedido creado. El pago está pendiente de confirmación.",
       data,
     });
   } catch (error) {
@@ -72,7 +74,9 @@ export async function postConfirmarPedidoWeb(req, res) {
 
     return res.json({
       ok: true,
-      msg: "Pago confirmado y reserva aplicada al inventario.",
+      msg: data.credito_id
+        ? "Enganche confirmado, crédito activado y reserva aplicada al inventario."
+        : "Pago confirmado y reserva aplicada al inventario.",
       data,
     });
   } catch (error) {

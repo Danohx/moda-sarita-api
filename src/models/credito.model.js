@@ -356,7 +356,12 @@ async function validarMetodoPagoReal(
   const metodoNormalizado = String(metodo || "")
     .trim()
     .toUpperCase();
-  const activeColumn = canal === "POS" ? "activo_pos" : "activo_admin";
+  const activeColumn =
+    canal === "POS"
+      ? "activo_pos"
+      : canal === "WEB"
+        ? "activo_web"
+        : "activo_admin";
   const { rows } = await client.query(
     `
       SELECT
@@ -440,6 +445,7 @@ export async function crearCreditoEnTransaccion(
     origen = "ADMIN",
     usuarioId = null,
     pagoEnganche = null,
+    pagoEngancheExistenteId = null,
   },
 ) {
   await setAuditContext(client, usuarioId);
@@ -622,35 +628,107 @@ export async function crearCreditoEnTransaccion(
       },
     );
 
-    const { rows } = await client.query(
-      `
-        INSERT INTO ventas.pagos (
-          pedido_id,
-          credito_id,
-          monto,
-          metodo,
-          referencia_externa,
-          concepto,
-          estado,
-          usuario_id
-        )
-        VALUES (
-          $1, $2, $3, $4::public.metodo_pago_enum, $5,
-          'ENGANCHE_CREDITO', 'CONFIRMADO', $6
-        )
-        RETURNING *
-      `,
-      [
-        pedidoId,
-        credito.id,
-        plan.enganche,
-        metodoEngancheConfig.codigo,
-        pagoEnganche.referenciaExterna || null,
-        usuarioId,
-      ],
-    );
+    if (pagoEngancheExistenteId) {
+      const { rows: existingRows } = await client.query(
+        `
+          SELECT
+            id,
+            pedido_id,
+            credito_id,
+            monto,
+            metodo,
+            referencia_externa,
+            concepto,
+            estado
+          FROM ventas.pagos
+          WHERE id = $1::uuid
+          FOR UPDATE
+        `,
+        [pagoEngancheExistenteId],
+      );
 
-    enganchePago = rows[0];
+      const existing = existingRows[0];
+      if (!existing) {
+        throw modelError("No se encontró el pago pendiente del enganche.", "NOT_FOUND");
+      }
+
+      if (String(existing.pedido_id) !== String(pedidoId)) {
+        throw modelError("El pago de enganche no pertenece al pedido.", "CONFLICT");
+      }
+
+      if (String(existing.concepto) !== "ENGANCHE_CREDITO") {
+        throw modelError("El pago indicado no corresponde a un enganche de crédito.", "CONFLICT");
+      }
+
+      if (String(existing.estado) !== "PENDIENTE") {
+        throw modelError(
+          `El enganche debe estar PENDIENTE para confirmarse; estado actual: ${existing.estado}.`,
+          "CONFLICT",
+        );
+      }
+
+      if (
+        dineroACentavos(existing.monto) !== dineroACentavos(plan.enganche)
+      ) {
+        throw modelError("El monto del enganche pendiente no coincide con el plan.", "CONFLICT");
+      }
+
+      if (String(existing.metodo) !== String(metodoEngancheConfig.codigo)) {
+        throw modelError("El método del enganche pendiente no coincide con el confirmado.", "CONFLICT");
+      }
+
+      const { rows } = await client.query(
+        `
+          UPDATE ventas.pagos
+          SET
+            credito_id = $2::uuid,
+            estado = 'CONFIRMADO',
+            usuario_id = $3,
+            referencia_externa = COALESCE($4, referencia_externa),
+            fecha_pago = now()
+          WHERE id = $1::uuid
+          RETURNING *
+        `,
+        [
+          existing.id,
+          credito.id,
+          usuarioId,
+          pagoEnganche.referenciaExterna || null,
+        ],
+      );
+
+      enganchePago = rows[0];
+    } else {
+      const { rows } = await client.query(
+        `
+          INSERT INTO ventas.pagos (
+            pedido_id,
+            credito_id,
+            monto,
+            metodo,
+            referencia_externa,
+            concepto,
+            estado,
+            usuario_id
+          )
+          VALUES (
+            $1, $2, $3, $4::public.metodo_pago_enum, $5,
+            'ENGANCHE_CREDITO', 'CONFIRMADO', $6
+          )
+          RETURNING *
+        `,
+        [
+          pedidoId,
+          credito.id,
+          plan.enganche,
+          metodoEngancheConfig.codigo,
+          pagoEnganche.referenciaExterna || null,
+          usuarioId,
+        ],
+      );
+
+      enganchePago = rows[0];
+    }
   }
 
   await client.query(

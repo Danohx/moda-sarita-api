@@ -78,6 +78,9 @@ function buildCheckoutFingerprint({
       ? {
           plazo_meses: Number(credito.plazo_meses),
           frecuencia_pago: String(credito.frecuencia_pago || "").toUpperCase(),
+          enganche_metodo: credito.enganche_metodo
+            ? String(credito.enganche_metodo).toUpperCase()
+            : null,
         }
       : null,
   };
@@ -100,9 +103,20 @@ async function getCheckoutResultByPedidoId(
         p.descuento,
         p.costo_envio,
         p.total,
-        COALESCE(pg.metodo::text, p.metodo_pago_solicitado::text) AS metodo_pago,
         CASE
-          WHEN p.metodo_pago_solicitado::text = 'CREDITO_TIENDA' AND pg.estado IS NULL THEN 'FINANCIADO'
+          WHEN p.metodo_pago_solicitado::text = 'CREDITO_TIENDA'
+            THEN 'CREDITO_TIENDA'
+          ELSE COALESCE(pg.metodo::text, p.metodo_pago_solicitado::text)
+        END AS metodo_pago,
+        CASE
+          WHEN p.metodo_pago_solicitado::text = 'CREDITO_TIENDA'
+            AND p.estado = 'PAGADO'
+            THEN 'FINANCIADO'
+          WHEN p.metodo_pago_solicitado::text = 'CREDITO_TIENDA'
+            AND pg.estado IS NOT NULL
+            THEN 'ENGANCHE_' || pg.estado::text
+          WHEN p.metodo_pago_solicitado::text = 'CREDITO_TIENDA'
+            THEN 'ENGANCHE_PENDIENTE'
           ELSE pg.estado::text
         END AS pago_estado
       FROM ventas.pedidos p
@@ -112,8 +126,11 @@ async function getCheckoutResultByPedidoId(
           pago.estado
         FROM ventas.pagos pago
         WHERE pago.pedido_id = p.id
-          AND pago.concepto = 'PAGO_TOTAL'
-        ORDER BY pago.fecha_pago DESC, pago.id DESC
+          AND pago.concepto IN ('PAGO_TOTAL', 'ENGANCHE_CREDITO')
+        ORDER BY
+          CASE WHEN pago.concepto = 'ENGANCHE_CREDITO' THEN 0 ELSE 1 END,
+          pago.fecha_pago DESC,
+          pago.id DESC
         LIMIT 1
       ) pg ON TRUE
       WHERE p.id = $1::uuid
@@ -213,6 +230,29 @@ function nextCreditDueDate(frequency) {
   return sumarMesesAncladosISO(today, 1);
 }
 
+function calcularEngancheMinimoWeb(totalCompra, config) {
+  const totalCentavos = Math.round(money(totalCompra) * 100);
+  if (totalCentavos <= 0) return 0;
+
+  let engancheCentavos = Math.ceil(
+    (totalCentavos * Number(config.porcentajeEngancheMinimo || 0)) / 100,
+  );
+
+  if (config.permiteEngancheCero !== true && engancheCentavos <= 0) {
+    engancheCentavos = 1;
+  }
+
+  if (engancheCentavos >= totalCentavos) {
+    throw checkoutError(
+      "La configuración de crédito exige un enganche igual o mayor al total de la compra.",
+      409,
+      "CREDIT_DOWNPAYMENT_CONFIGURATION",
+    );
+  }
+
+  return money(engancheCentavos / 100);
+}
+
 export async function obtenerOpcionesCreditoWeb(db, usuarioId, totalCompra) {
   const total = money(totalCompra);
   if (total <= 0) {
@@ -230,6 +270,8 @@ export async function obtenerOpcionesCreditoWeb(db, usuarioId, totalCompra) {
   }
 
   const limiteCredito = money(cliente.limite_credito || 0);
+  const saldoDeudor = money(cliente.saldo_deudor || 0);
+  const creditoDisponible = Math.max(money(limiteCredito - saldoDeudor), 0);
   const creditoActivo = cliente.tiene_credito === true && limiteCredito > 0;
 
   if (!creditoActivo) {
@@ -240,28 +282,36 @@ export async function obtenerOpcionesCreditoWeb(db, usuarioId, totalCompra) {
         ? "LIMITE_NO_CONFIGURADO"
         : "CREDITO_NO_HABILITADO",
       limite_credito: limiteCredito,
-      saldo_deudor: money(cliente.saldo_deudor || 0),
-      credito_disponible: Math.max(
-        money(limiteCredito - Number(cliente.saldo_deudor || 0)),
-        0,
-      ),
+      saldo_deudor: saldoDeudor,
+      credito_disponible: creditoDisponible,
     };
   }
 
   const parametros = await obtenerParametrosCredito(db);
   const config = normalizarConfiguracionCredito(parametros);
-  if (!config.permiteEngancheCero || config.porcentajeEngancheMinimo > 0) {
+  const engancheMinimo = calcularEngancheMinimoWeb(total, config);
+  const requiereEnganche = engancheMinimo > 0;
+  const montoFinanciado = money(total - engancheMinimo);
+
+  let transferenciaDisponible = true;
+  if (requiereEnganche) {
+    const transferencia = await getMetodoPagoWeb(db, "TRANSFERENCIA");
+    transferenciaDisponible = transferencia?.activo_web === true;
+  }
+
+  if (!transferenciaDisponible) {
     return {
       mostrar: true,
       elegible: false,
-      motivo: "ENGANCHE_WEB_REQUERIDO",
-      mensaje: "Tu crédito está activo, pero la configuración actual exige enganche y todavía no se cobra el enganche desde la tienda web.",
+      motivo: "TRANSFERENCIA_ENGANCHE_NO_DISPONIBLE",
+      mensaje: "Tu crédito requiere enganche, pero Transferencia no está activa para la tienda web.",
       limite_credito: limiteCredito,
-      saldo_deudor: money(cliente.saldo_deudor || 0),
-      credito_disponible: Math.max(
-        money(limiteCredito - Number(cliente.saldo_deudor || 0)),
-        0,
-      ),
+      saldo_deudor: saldoDeudor,
+      credito_disponible: creditoDisponible,
+      requiere_enganche: requiereEnganche,
+      enganche_minimo: engancheMinimo,
+      monto_financiado_estimado: montoFinanciado,
+      metodo_enganche_obligatorio: requiereEnganche ? "TRANSFERENCIA" : null,
       plazos: config.plazosPermitidos,
       frecuencias: config.frecuenciasPermitidas,
     };
@@ -269,19 +319,25 @@ export async function obtenerOpcionesCreditoWeb(db, usuarioId, totalCompra) {
 
   const elegibilidad = evaluarElegibilidadCliente({
     cliente,
-    montoFinanciado: total,
+    montoFinanciado,
     configuracion: parametros,
   });
 
   return {
-    // "mostrar" significa que el cliente posee una línea de crédito activa.
-    // "elegible" indica si puede usarla para ESTA compra concreta.
     mostrar: true,
     elegible: elegibilidad.apto,
     motivo: elegibilidad.apto
       ? null
       : elegibilidad.validaciones_incumplidas[0] || "NO_ELEGIBLE",
     ...elegibilidad,
+    limite_credito: limiteCredito,
+    saldo_deudor: saldoDeudor,
+    credito_disponible: creditoDisponible,
+    requiere_enganche: requiereEnganche,
+    enganche_minimo: engancheMinimo,
+    monto_financiado_estimado: montoFinanciado,
+    metodo_enganche_obligatorio: requiereEnganche ? "TRANSFERENCIA" : null,
+    transferencia_enganche_disponible: transferenciaDisponible,
     plazos: config.plazosPermitidos,
     frecuencias: config.frecuenciasPermitidas,
   };
@@ -844,29 +900,68 @@ export async function crearPedidoWeb(
       paymentConfig.es_credito === true || metodo === "CREDITO_TIENDA";
 
     let planCredito = null;
+    let metodoEnganche = null;
+    let transferenciaEngancheConfig = null;
+
     if (esCredito) {
       const parametrosCredito = await obtenerParametrosCredito(client);
       const configCredito = normalizarConfiguracionCredito(parametrosCredito);
+      const plazoMeses = Number(credito?.plazo_meses);
+      const frecuenciaPago = String(credito?.frecuencia_pago || "")
+        .trim()
+        .toUpperCase();
 
-      if (!configCredito.permiteEngancheCero || configCredito.porcentajeEngancheMinimo > 0) {
+      if (!Number.isInteger(plazoMeses) || !frecuenciaPago) {
         throw checkoutError(
-          "El crédito web no está disponible porque la configuración actual requiere enganche.",
-          409,
-          "WEB_CREDIT_DOWNPAYMENT_REQUIRED",
+          "Selecciona plazo y frecuencia para el crédito de tienda.",
+          400,
+          "CREDIT_PLAN_REQUIRED",
         );
       }
 
-      const plazoMeses = Number(credito?.plazo_meses);
-      const frecuenciaPago = String(credito?.frecuencia_pago || "").trim().toUpperCase();
-      if (!Number.isInteger(plazoMeses) || !frecuenciaPago) {
-        throw checkoutError("Selecciona plazo y frecuencia para el crédito de tienda.", 400, "CREDIT_PLAN_REQUIRED");
+      const engancheMinimo = calcularEngancheMinimoWeb(total, configCredito);
+      metodoEnganche = engancheMinimo > 0
+        ? String(credito?.enganche_metodo || "").trim().toUpperCase()
+        : null;
+
+      if (engancheMinimo > 0 && metodoEnganche !== "TRANSFERENCIA") {
+        throw checkoutError(
+          "Por ahora el enganche del crédito web solo puede pagarse por transferencia.",
+          400,
+          "WEB_CREDIT_DOWNPAYMENT_METHOD",
+        );
       }
+
+      if (engancheMinimo > 0) {
+        transferenciaEngancheConfig = await getMetodoPagoWeb(
+          client,
+          "TRANSFERENCIA",
+        );
+
+        if (!transferenciaEngancheConfig || transferenciaEngancheConfig.activo_web !== true) {
+          throw checkoutError(
+            "Transferencia no está disponible para pagar el enganche en la tienda web.",
+            409,
+            "WEB_CREDIT_TRANSFER_DISABLED",
+          );
+        }
+      }
+
+      planCredito = calcularPlanCredito({
+        totalCompra: total,
+        enganche: engancheMinimo,
+        plazoMeses,
+        frecuenciaPago,
+        fechaPrimerVencimiento: nextCreditDueDate(frecuenciaPago),
+        configuracion: parametrosCredito,
+      });
 
       const elegibilidad = evaluarElegibilidadCliente({
         cliente,
-        montoFinanciado: total,
+        montoFinanciado: planCredito.monto_financiado,
         configuracion: parametrosCredito,
       });
+
       if (!elegibilidad.apto) {
         throw checkoutError(
           "Tu línea de crédito no cumple actualmente las condiciones para financiar esta compra.",
@@ -874,15 +969,6 @@ export async function crearPedidoWeb(
           "CREDIT_NOT_ELIGIBLE",
         );
       }
-
-      planCredito = calcularPlanCredito({
-        totalCompra: total,
-        enganche: 0,
-        plazoMeses,
-        frecuenciaPago,
-        fechaPrimerVencimiento: nextCreditDueDate(frecuenciaPago),
-        configuracion: parametrosCredito,
-      });
     }
 
     const costoEnvioConfirmado = true;
@@ -974,7 +1060,10 @@ export async function crearPedidoWeb(
         [pedido.id, item.variante_id, item.cantidad, item.precio_unitario],
       );
 
-      if (esCredito) {
+      const creditoConEnganchePendiente =
+        esCredito && Number(planCredito?.enganche || 0) > 0;
+
+      if (esCredito && !creditoConEnganchePendiente) {
         const salidaResult = await client.query(
           `
             UPDATE inventario.variantes_producto
@@ -987,11 +1076,20 @@ export async function crearPedidoWeb(
           [item.variante_id, item.cantidad],
         );
         if (!salidaResult.rows[0]) {
-          throw checkoutError(`El stock de ${item.producto_nombre} cambió antes de confirmar el pedido.`, 409, "STOCK");
+          throw checkoutError(
+            `El stock de ${item.producto_nombre} cambió antes de confirmar el pedido.`,
+            409,
+            "STOCK",
+          );
         }
         await client.query(
           `INSERT INTO inventario.movimientos (variante_id, usuario_id, cantidad, motivo, tipo) VALUES ($1,$2,$3,$4,'SALIDA')`,
-          [item.variante_id, usuarioId, -Math.abs(item.cantidad), `Venta web a crédito, folio ${pedido.folio}`],
+          [
+            item.variante_id,
+            usuarioId,
+            -Math.abs(item.cantidad),
+            `Venta web a crédito, folio ${pedido.folio}`,
+          ],
         );
       } else {
         const reservaResult = await client.query(
@@ -1006,15 +1104,72 @@ export async function crearPedidoWeb(
           [item.variante_id, item.cantidad],
         );
         if (!reservaResult.rows[0]) {
-          throw checkoutError(`El stock de ${item.producto_nombre} cambió antes de confirmar el pedido.`, 409, "STOCK");
+          throw checkoutError(
+            `El stock de ${item.producto_nombre} cambió antes de confirmar el pedido.`,
+            409,
+            "STOCK",
+          );
         }
       }
     }
 
     let pagoEstado = "PENDIENTE";
     let creditoCreado = null;
+    let enganchePago = null;
 
-    if (esCredito) {
+    if (esCredito && Number(planCredito?.enganche || 0) > 0) {
+      const referenciaEnganche = `ENG-CRED-WEB-${pedido.folio}`;
+
+      const pagoResult = await client.query(
+        `
+          INSERT INTO ventas.pagos (
+            pedido_id,
+            monto,
+            metodo,
+            referencia_externa,
+            concepto,
+            estado,
+            usuario_id
+          )
+          VALUES (
+            $1, $2, 'TRANSFERENCIA', $3,
+            'ENGANCHE_CREDITO', 'PENDIENTE', NULL
+          )
+          RETURNING *
+        `,
+        [pedido.id, planCredito.enganche, referenciaEnganche],
+      );
+
+      enganchePago = pagoResult.rows[0];
+
+      await client.query(
+        `
+          INSERT INTO ventas.credito_web_pendiente (
+            pedido_id,
+            cliente_id,
+            pago_enganche_id,
+            plan,
+            estado
+          )
+          VALUES ($1, $2, $3, $4::jsonb, 'PENDIENTE')
+          ON CONFLICT (pedido_id) DO UPDATE
+          SET
+            pago_enganche_id = EXCLUDED.pago_enganche_id,
+            plan = EXCLUDED.plan,
+            estado = 'PENDIENTE',
+            confirmado_at = NULL,
+            confirmado_por = NULL
+        `,
+        [
+          pedido.id,
+          cliente.id,
+          enganchePago.id,
+          JSON.stringify(planCredito),
+        ],
+      );
+
+      pagoEstado = "ENGANCHE_PENDIENTE";
+    } else if (esCredito) {
       creditoCreado = await crearCreditoEnTransaccion(client, {
         clienteId: cliente.id,
         pedidoId: pedido.id,
@@ -1036,16 +1191,24 @@ export async function crearPedidoWeb(
           )
           VALUES ($1,$2,$3,$4,'PAGO_TOTAL','PENDIENTE',NULL)
         `,
-        [pedido.id, total, metodo, referencia_externa ? String(referencia_externa).trim() : null],
+        [
+          pedido.id,
+          total,
+          metodo,
+          referencia_externa ? String(referencia_externa).trim() : null,
+        ],
       );
     }
 
     await client.query("COMMIT");
 
+    const creditoPendiente =
+      esCredito && Number(planCredito?.enganche || 0) > 0;
+
     return {
       pedido_id: pedido.id,
       folio: pedido.folio,
-      estado: esCredito ? "PAGADO" : "PENDIENTE",
+      estado: esCredito && !creditoPendiente ? "PAGADO" : "PENDIENTE",
       subtotal,
       descuento: coupon.descuento,
       costo_envio: costoEnvio,
@@ -1053,6 +1216,10 @@ export async function crearPedidoWeb(
       metodo_pago: metodo,
       pago_estado: pagoEstado,
       credito_id: creditoCreado?.credito?.id ?? null,
+      enganche_monto: creditoPendiente ? money(planCredito.enganche) : 0,
+      enganche_metodo: creditoPendiente ? metodoEnganche : null,
+      enganche_referencia: enganchePago?.referencia_externa ?? null,
+      monto_financiado: esCredito ? money(planCredito?.monto_financiado || 0) : 0,
       items: orderItems,
     };
   } catch (error) {
@@ -1083,9 +1250,11 @@ export async function confirmarPedidoWeb(
         SELECT
           id,
           folio,
+          cliente_id,
           tipo,
           estado,
-          total
+          total,
+          metodo_pago_solicitado
         FROM ventas.pedidos
         WHERE id = $1::uuid
         FOR UPDATE
@@ -1107,10 +1276,8 @@ export async function confirmarPedidoWeb(
       );
     }
 
-    // Idempotencia de la operación.
     if (pedido.estado === "PAGADO") {
       const result = await getCheckoutResultByPedidoId(client, pedido.id);
-
       await client.query("COMMIT");
       return result;
     }
@@ -1123,28 +1290,69 @@ export async function confirmarPedidoWeb(
       );
     }
 
+    const esCreditoTienda =
+      String(pedido.metodo_pago_solicitado || "").toUpperCase() ===
+      "CREDITO_TIENDA";
+
+    let creditoWebPendiente = null;
+    if (esCreditoTienda) {
+      const { rows } = await client.query(
+        `
+          SELECT
+            pedido_id,
+            cliente_id,
+            pago_enganche_id,
+            plan,
+            estado
+          FROM ventas.credito_web_pendiente
+          WHERE pedido_id = $1::uuid
+          FOR UPDATE
+        `,
+        [pedido.id],
+      );
+      creditoWebPendiente = rows[0] || null;
+
+      if (!creditoWebPendiente || creditoWebPendiente.estado !== "PENDIENTE") {
+        throw checkoutError(
+          "El pedido a crédito no tiene un enganche pendiente válido.",
+          409,
+          "CREDIT_DOWNPAYMENT_PENDING_NOT_FOUND",
+        );
+      }
+    }
+
     const { rows: pagoRows } = await client.query(
-      `
-        SELECT
-          id,
-          estado,
-          monto,
-          metodo
-        FROM ventas.pagos
-        WHERE pedido_id = $1::uuid
-          AND concepto = 'PAGO_TOTAL'
-        ORDER BY fecha_pago DESC, id DESC
-        LIMIT 1
-        FOR UPDATE
-      `,
-      [pedido.id],
+      esCreditoTienda
+        ? `
+            SELECT id, estado, monto, metodo, referencia_externa, concepto
+            FROM ventas.pagos
+            WHERE id = $1::uuid
+              AND pedido_id = $2::uuid
+              AND concepto = 'ENGANCHE_CREDITO'
+            LIMIT 1
+            FOR UPDATE
+          `
+        : `
+            SELECT id, estado, monto, metodo, referencia_externa, concepto
+            FROM ventas.pagos
+            WHERE pedido_id = $1::uuid
+              AND concepto = 'PAGO_TOTAL'
+            ORDER BY fecha_pago DESC, id DESC
+            LIMIT 1
+            FOR UPDATE
+          `,
+      esCreditoTienda
+        ? [creditoWebPendiente.pago_enganche_id, pedido.id]
+        : [pedido.id],
     );
 
     const pago = pagoRows[0];
 
     if (!pago) {
       throw checkoutError(
-        "El pedido no tiene un pago registrado.",
+        esCreditoTienda
+          ? "El pedido no tiene registrado el enganche por transferencia."
+          : "El pedido no tiene un pago registrado.",
         409,
         "PAYMENT_NOT_FOUND",
       );
@@ -1158,11 +1366,17 @@ export async function confirmarPedidoWeb(
       );
     }
 
+    if (esCreditoTienda && String(pago.metodo).toUpperCase() !== "TRANSFERENCIA") {
+      throw checkoutError(
+        "El enganche web solo puede confirmarse por transferencia.",
+        409,
+        "INVALID_DOWNPAYMENT_METHOD",
+      );
+    }
+
     const { rows: detalles } = await client.query(
       `
-        SELECT
-          variante_id,
-          cantidad
+        SELECT variante_id, cantidad
         FROM ventas.detalles_pedido
         WHERE pedido_id = $1::uuid
         ORDER BY variante_id
@@ -1182,10 +1396,7 @@ export async function confirmarPedidoWeb(
 
     const { rows: variantes } = await client.query(
       `
-        SELECT
-          id,
-          stock_fisico,
-          stock_apartado
+        SELECT id, stock_fisico, stock_apartado
         FROM inventario.variantes_producto
         WHERE id = ANY($1::uuid[])
         ORDER BY id
@@ -1208,7 +1419,6 @@ export async function confirmarPedidoWeb(
 
     for (const detalle of detalles) {
       const variante = variantesMap.get(detalle.variante_id);
-
       const cantidad = Number(detalle.cantidad);
       const stockFisico = Number(variante.stock_fisico);
       const stockApartado = Number(variante.stock_apartado);
@@ -1259,11 +1469,7 @@ export async function confirmarPedidoWeb(
       await client.query(
         `
           INSERT INTO inventario.movimientos (
-            variante_id,
-            usuario_id,
-            cantidad,
-            motivo,
-            tipo
+            variante_id, usuario_id, cantidad, motivo, tipo
           )
           VALUES ($1,$2,$3,$4,'SALIDA')
         `,
@@ -1271,31 +1477,71 @@ export async function confirmarPedidoWeb(
           detalle.variante_id,
           usuarioId,
           -Math.abs(cantidad),
-          `CONFIRMACIÓN PEDIDO WEB ${pedido.folio}`,
+          esCreditoTienda
+            ? `CONFIRMACIÓN ENGANCHE CRÉDITO WEB ${pedido.folio}`
+            : `CONFIRMACIÓN PEDIDO WEB ${pedido.folio}`,
         ],
+      );
+    }
+
+    let creditoCreado = null;
+
+    if (esCreditoTienda) {
+      const plan = creditoWebPendiente.plan;
+
+      if (!plan || typeof plan !== "object") {
+        throw checkoutError(
+          "El plan pendiente del crédito no es válido.",
+          500,
+          "INVALID_PENDING_CREDIT_PLAN",
+        );
+      }
+
+      creditoCreado = await crearCreditoEnTransaccion(client, {
+        clienteId: pedido.cliente_id,
+        pedidoId: pedido.id,
+        plan,
+        origen: "WEB",
+        usuarioId,
+        pagoEnganche: {
+          metodo: pago.metodo,
+          canal: "WEB",
+          referenciaExterna:
+            normalizeOptional(referencia_externa) ?? pago.referencia_externa,
+        },
+        pagoEngancheExistenteId: pago.id,
+      });
+
+      await client.query(
+        `
+          UPDATE ventas.credito_web_pendiente
+          SET
+            estado = 'ACTIVADO',
+            confirmado_at = now(),
+            confirmado_por = $2
+          WHERE pedido_id = $1::uuid
+        `,
+        [pedido.id, usuarioId],
+      );
+    } else {
+      await client.query(
+        `
+          UPDATE ventas.pagos
+          SET
+            estado = 'CONFIRMADO',
+            usuario_id = $2,
+            referencia_externa = COALESCE($3, referencia_externa),
+            fecha_pago = now()
+          WHERE id = $1::uuid
+        `,
+        [pago.id, usuarioId, normalizeOptional(referencia_externa)],
       );
     }
 
     await client.query(
       `
-        UPDATE ventas.pagos
-        SET
-          estado = 'CONFIRMADO',
-          usuario_id = $2,
-          referencia_externa =
-            COALESCE($3, referencia_externa),
-          fecha_pago = now()
-        WHERE id = $1::uuid
-      `,
-      [pago.id, usuarioId, normalizeOptional(referencia_externa)],
-    );
-
-    await client.query(
-      `
         UPDATE ventas.pedidos
-        SET
-          estado = 'PAGADO',
-          liquidado_at = now()
+        SET estado = 'PAGADO', liquidado_at = now()
         WHERE id = $1::uuid
       `,
       [pedido.id],
@@ -1303,7 +1549,11 @@ export async function confirmarPedidoWeb(
 
     await client.query("COMMIT");
 
-    return await getCheckoutResultByPedidoId(client, pedido.id);
+    const result = await getCheckoutResultByPedidoId(client, pedido.id);
+    if (creditoCreado?.credito?.id) {
+      result.credito_id = creditoCreado.credito.id;
+    }
+    return result;
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -1311,6 +1561,7 @@ export async function confirmarPedidoWeb(
     client.release();
   }
 }
+
 
 export async function cancelarPedidoWeb(
   db,
@@ -1457,6 +1708,16 @@ export async function cancelarPedidoWeb(
           AND estado = 'PENDIENTE'
       `,
       [pedido.id, usuarioId],
+    );
+
+    await client.query(
+      `
+        UPDATE ventas.credito_web_pendiente
+        SET estado = 'CANCELADO'
+        WHERE pedido_id = $1::uuid
+          AND estado = 'PENDIENTE'
+      `,
+      [pedido.id],
     );
 
     await client.query(

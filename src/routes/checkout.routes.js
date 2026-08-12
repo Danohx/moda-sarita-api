@@ -55,6 +55,9 @@ router.post(
   body("credito").optional({ nullable: true }).isObject(),
   body("credito.plazo_meses").optional().isInt({ min: 1, max: 60 }),
   body("credito.frecuencia_pago").optional().isIn(["SEMANAL", "QUINCENAL", "MENSUAL"]),
+  body("credito.enganche_metodo")
+    .optional({ nullable: true })
+    .isIn(["TRANSFERENCIA"]),
   body("referencia_externa").optional({ nullable: true }).isLength({ max: 150 }),
   body("cupon_codigo").optional({ nullable: true }).isLength({ max: 30 }),
   body("observaciones").optional({ nullable: true }).isLength({ max: 500 }),
