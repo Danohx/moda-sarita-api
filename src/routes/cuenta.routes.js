@@ -23,6 +23,7 @@ import {
   patchMiPerfil,
   postMiDireccion,
 } from "../controllers/cuenta.controller.js";
+import { postAlexaWidgetTarget } from "../controllers/alexaSync.controller.js";
 
 const router = Router();
 
@@ -52,7 +53,9 @@ const direccionValidators = [
   body("colonia").optional({ nullable: true }).isLength({ max: 100 }),
   body("ciudad").trim().isLength({ min: 2, max: 100 }),
   body("estado").trim().isLength({ min: 2, max: 100 }),
-  body("codigo_postal").trim().matches(/^\d{5}$/),
+  body("codigo_postal")
+    .trim()
+    .matches(/^\d{5}$/),
   body("referencias").optional({ nullable: true }).isLength({ max: 500 }),
   body("es_principal").optional().isBoolean(),
 ];
@@ -89,7 +92,10 @@ router.patch(
   body("colonia").optional({ nullable: true }).isLength({ max: 100 }),
   body("ciudad").optional().trim().isLength({ min: 2, max: 100 }),
   body("estado").optional().trim().isLength({ min: 2, max: 100 }),
-  body("codigo_postal").optional().trim().matches(/^\d{5}$/),
+  body("codigo_postal")
+    .optional()
+    .trim()
+    .matches(/^\d{5}$/),
   body("referencias").optional({ nullable: true }).isLength({ max: 500 }),
   body("es_principal").optional().isBoolean(),
   validar,
@@ -186,5 +192,6 @@ router.get(
   validar,
   getMiPedido,
 );
+router.post("/alexa/widget-target", postAlexaWidgetTarget);
 
 export default router;

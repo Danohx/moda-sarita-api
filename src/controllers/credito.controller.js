@@ -1,3 +1,4 @@
+import { programarSincronizacionAlexa } from "../services/alexa-sync.service.js";
 import {
   cancelarCredito,
   crearCredito,
@@ -188,7 +189,11 @@ export async function getCreditosCliente(req, res) {
       },
     });
   } catch (error) {
-    return handleCreditoError(res, error, "Error consultando créditos del cliente");
+    return handleCreditoError(
+      res,
+      error,
+      "Error consultando créditos del cliente",
+    );
   }
 }
 
@@ -239,6 +244,7 @@ export async function postCrearCredito(req, res) {
         origen: created.credito.origen,
       },
     });
+    programarSincronizacionAlexa(created.credito.cliente_id);
 
     return res.status(201).json({ ok: true, data: detail });
   } catch (error) {
@@ -262,9 +268,9 @@ export async function postAbonoCredito(req, res) {
     await registrarAuditoriaCredito(req.db, {
       modulo: "clientes.creditos",
       accion: "payment_create",
-      descripcion: `Se registró un abono de $${Number(result.pago.monto).toFixed(
-        2,
-      )} al crédito ${creditoId}.`,
+      descripcion: `Se registró un abono de $${Number(
+        result.pago.monto,
+      ).toFixed(2)} al crédito ${creditoId}.`,
       usuarioId: req.user?.id ?? null,
       metadata: {
         credito_id: creditoId,
@@ -275,6 +281,7 @@ export async function postAbonoCredito(req, res) {
         saldo_pendiente: Number(result.credito.saldo_pendiente),
       },
     });
+    programarSincronizacionAlexa(created.credito.cliente_id);
 
     return res.status(201).json({
       ok: true,
@@ -309,6 +316,8 @@ export async function postCancelarCredito(req, res) {
         motivo,
       },
     });
+
+    programarSincronizacionAlexa(created.credito.cliente_id);
 
     return res.json({ ok: true, data });
   } catch (error) {
@@ -413,7 +422,11 @@ export async function getReporteCreditoOperativoPdf(req, res) {
     return await exportarReporteCredito(req, res, "credito", "pdf");
   } catch (error) {
     if (res.headersSent) return res.end();
-    return handleCreditoError(res, error, "Error exportando reporte de crédito");
+    return handleCreditoError(
+      res,
+      error,
+      "Error exportando reporte de crédito",
+    );
   }
 }
 
@@ -421,7 +434,11 @@ export async function getReporteCreditoOperativoExcel(req, res) {
   try {
     return await exportarReporteCredito(req, res, "credito", "excel");
   } catch (error) {
-    return handleCreditoError(res, error, "Error exportando reporte de crédito");
+    return handleCreditoError(
+      res,
+      error,
+      "Error exportando reporte de crédito",
+    );
   }
 }
 
@@ -430,7 +447,11 @@ export async function getReporteFinancieroCreditoPdf(req, res) {
     return await exportarReporteCredito(req, res, "financiero", "pdf");
   } catch (error) {
     if (res.headersSent) return res.end();
-    return handleCreditoError(res, error, "Error exportando reporte financiero");
+    return handleCreditoError(
+      res,
+      error,
+      "Error exportando reporte financiero",
+    );
   }
 }
 
@@ -438,7 +459,11 @@ export async function getReporteFinancieroCreditoExcel(req, res) {
   try {
     return await exportarReporteCredito(req, res, "financiero", "excel");
   } catch (error) {
-    return handleCreditoError(res, error, "Error exportando reporte financiero");
+    return handleCreditoError(
+      res,
+      error,
+      "Error exportando reporte financiero",
+    );
   }
 }
 
@@ -467,6 +492,10 @@ export async function getComprobantePagoCreditoPdf(req, res) {
     pdf.pipe(res);
   } catch (error) {
     if (res.headersSent) return res.end();
-    return handleCreditoError(res, error, "Error generando comprobante de crédito");
+    return handleCreditoError(
+      res,
+      error,
+      "Error generando comprobante de crédito",
+    );
   }
 }
