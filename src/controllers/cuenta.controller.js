@@ -18,6 +18,7 @@ import {
   obtenerMiResumenPortal,
   obtenerMiPedido,
 } from "../models/cuenta.model.js";
+import { crearSolicitudTransferenciaCreditoCliente } from "../models/credito.model.js";
 
 function handleError(res, error, fallback) {
   console.error(fallback, error);
@@ -32,6 +33,30 @@ function handleError(res, error, fallback) {
 
   if (error.code === "22P02") {
     return res.status(400).json({ ok: false, msg: "Identificador inválido." });
+  }
+
+  if (error.code === "NOT_FOUND") {
+    return res
+      .status(404)
+      .json({ ok: false, msg: error.message, code: error.code });
+  }
+
+  if (error.code === "FORBIDDEN") {
+    return res
+      .status(403)
+      .json({ ok: false, msg: error.message, code: error.code });
+  }
+
+  if (error.code === "CONFLICT") {
+    return res
+      .status(409)
+      .json({ ok: false, msg: error.message, code: error.code });
+  }
+
+  if (error.code === "VALIDATION") {
+    return res
+      .status(400)
+      .json({ ok: false, msg: error.message, code: error.code });
   }
 
   if (error.status) {
@@ -118,9 +143,17 @@ export async function patchMiDireccionPrincipal(req, res) {
       req.user.id,
       req.params.direccionId,
     );
-    return res.json({ ok: true, msg: "Dirección principal actualizada.", data });
+    return res.json({
+      ok: true,
+      msg: "Dirección principal actualizada.",
+      data,
+    });
   } catch (error) {
-    return handleError(res, error, "Error seleccionando la dirección principal.");
+    return handleError(
+      res,
+      error,
+      "Error seleccionando la dirección principal.",
+    );
   }
 }
 
@@ -163,7 +196,11 @@ export async function getMisMovimientosCredito(req, res) {
       },
     });
   } catch (error) {
-    return handleError(res, error, "Error obteniendo los movimientos de crédito.");
+    return handleError(
+      res,
+      error,
+      "Error obteniendo los movimientos de crédito.",
+    );
   }
 }
 
@@ -198,8 +235,14 @@ export async function getMiCreditoDetalle(req, res) {
 
 export async function getMisCuotasCredito(req, res) {
   try {
-    const data = await listarMisCuotasCredito(req.db, req.user.id, req.params.creditoId, req.query);
-    if (!data) return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
+    const data = await listarMisCuotasCredito(
+      req.db,
+      req.user.id,
+      req.params.creditoId,
+      req.query,
+    );
+    if (!data)
+      return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
     return res.json({ ok: true, data: data.items, pagination: data });
   } catch (error) {
     return handleError(res, error, "Error obteniendo las cuotas del crédito.");
@@ -208,28 +251,77 @@ export async function getMisCuotasCredito(req, res) {
 
 export async function getMisPagosCredito(req, res) {
   try {
-    const data = await listarMisPagosCredito(req.db, req.user.id, req.params.creditoId, req.query);
-    if (!data) return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
+    const data = await listarMisPagosCredito(
+      req.db,
+      req.user.id,
+      req.params.creditoId,
+      req.query,
+    );
+    if (!data)
+      return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
     return res.json({ ok: true, data: data.items, pagination: data });
   } catch (error) {
     return handleError(res, error, "Error obteniendo los pagos del crédito.");
   }
 }
 
+export async function postMiPagoCreditoTransferencia(req, res) {
+  try {
+    const data = await crearSolicitudTransferenciaCreditoCliente(
+      req.db,
+      req.params.creditoId,
+      {
+        usuarioId: req.user.id,
+        monto: req.body?.monto,
+      },
+    );
+
+    return res.status(data.reutilizado ? 200 : 201).json({
+      ok: true,
+      msg: data.reutilizado
+        ? "Ya existe una transferencia pendiente para este crédito."
+        : "Transferencia registrada como pendiente de confirmación.",
+      data,
+    });
+  } catch (error) {
+    return handleError(
+      res,
+      error,
+      "Error registrando la transferencia del crédito.",
+    );
+  }
+}
+
 export async function getMisMovimientosCreditoDetalle(req, res) {
   try {
-    const data = await listarMisMovimientosCreditoPorCredito(req.db, req.user.id, req.params.creditoId, req.query);
-    if (!data) return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
+    const data = await listarMisMovimientosCreditoPorCredito(
+      req.db,
+      req.user.id,
+      req.params.creditoId,
+      req.query,
+    );
+    if (!data)
+      return res.status(404).json({ ok: false, msg: "Crédito no encontrado." });
     return res.json({ ok: true, data: data.items, pagination: data });
   } catch (error) {
-    return handleError(res, error, "Error obteniendo los movimientos del crédito.");
+    return handleError(
+      res,
+      error,
+      "Error obteniendo los movimientos del crédito.",
+    );
   }
 }
 
 export async function getMisPagosPedido(req, res) {
   try {
-    const data = await listarMisPagosPedido(req.db, req.user.id, req.params.pedidoId, req.query);
-    if (!data) return res.status(404).json({ ok: false, msg: "Pedido no encontrado." });
+    const data = await listarMisPagosPedido(
+      req.db,
+      req.user.id,
+      req.params.pedidoId,
+      req.query,
+    );
+    if (!data)
+      return res.status(404).json({ ok: false, msg: "Pedido no encontrado." });
     return res.json({ ok: true, data: data.items, pagination: data });
   } catch (error) {
     return handleError(res, error, "Error obteniendo los pagos del pedido.");
@@ -266,7 +358,11 @@ export async function getMisApartados(req, res) {
 
 export async function getMiPedido(req, res) {
   try {
-    const data = await obtenerMiPedido(req.db, req.user.id, req.params.pedidoId);
+    const data = await obtenerMiPedido(
+      req.db,
+      req.user.id,
+      req.params.pedidoId,
+    );
     if (!data) {
       return res.status(404).json({ ok: false, msg: "Pedido no encontrado." });
     }

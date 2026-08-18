@@ -18,13 +18,14 @@ import {
   getCreditos,
   postAbonoCredito,
   postCancelarCredito,
+  postConfirmarTransferenciaCredito,
+  postRechazarTransferenciaCredito,
   postCrearCredito,
   postProcesarVencimientos,
   postSimularCredito,
 } from "../controllers/credito.controller.js";
 
 const router = Router();
-
 
 router.use(useInternalDb, requireAuth);
 
@@ -80,15 +81,21 @@ router.post(
   requirePermission("credito.overdue.run"),
   postProcesarVencimientos,
 );
-router.get(
-  "/:creditoId",
-  requirePermission("credito.view"),
-  getCredito,
-);
+router.get("/:creditoId", requirePermission("credito.view"), getCredito);
 router.post(
   "/:creditoId/abonos",
   requirePermission("credito.payments.create"),
   postAbonoCredito,
+);
+router.post(
+  "/:creditoId/pagos/:pagoId/confirmar-transferencia",
+  requirePermission("credito.payments.create"),
+  postConfirmarTransferenciaCredito,
+);
+router.post(
+  "/:creditoId/pagos/:pagoId/rechazar-transferencia",
+  requirePermission("credito.payments.create"),
+  postRechazarTransferenciaCredito,
 );
 router.post(
   "/:creditoId/cancelar",

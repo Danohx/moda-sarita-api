@@ -1,6 +1,7 @@
 // src/models/credito.model.js
 // SQL y transacciones del módulo de crédito.
 
+import { randomUUID } from "node:crypto";
 import {
   calcularPlanCredito,
   centavosADinero,
@@ -921,6 +922,8 @@ export async function registrarAbonoCredito(
     usuarioId = null,
     canal = "ADMIN",
     fechaPago = new Date().toISOString(),
+    pagoPendienteId = null,
+    requiereTurno = true,
   },
 ) {
   return withTransaction(
@@ -948,7 +951,46 @@ export async function registrarAbonoCredito(
         throw modelError(`No se puede abonar a un crédito ${credito.estado}.`);
       }
 
-      const paymentCents = dineroACentavos(monto, "monto");
+      if (!usuarioId) {
+        throw modelError("El usuario que confirma o registra el abono es requerido.");
+      }
+
+      let pagoPendiente = null;
+      let montoFinal = monto;
+      let metodoFinal = metodoPago;
+      let referenciaFinal = referenciaExterna;
+
+      if (pagoPendienteId) {
+        const { rows } = await client.query(
+          `
+            SELECT *
+            FROM ventas.pagos
+            WHERE id = $1::uuid
+              AND credito_id = $2::uuid
+              AND estado = 'PENDIENTE'
+              AND metodo = 'TRANSFERENCIA'
+              AND concepto IN ('ABONO_CREDITO', 'LIQUIDACION_CREDITO')
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [pagoPendienteId, credito.id],
+        );
+
+        pagoPendiente = rows[0] || null;
+        if (!pagoPendiente) {
+          throw modelError(
+            "No se encontró una transferencia pendiente válida para este crédito.",
+            "NOT_FOUND",
+          );
+        }
+
+        montoFinal = pagoPendiente.monto;
+        metodoFinal = pagoPendiente.metodo;
+        referenciaFinal =
+          referenciaExterna || pagoPendiente.referencia_externa || null;
+      }
+
+      const paymentCents = dineroACentavos(montoFinal, "monto");
       const creditBalanceCents = dineroACentavos(
         credito.saldo_pendiente,
         "saldo_pendiente",
@@ -959,30 +1001,36 @@ export async function registrarAbonoCredito(
         throw modelError("El abono no puede exceder el saldo del crédito.");
       }
 
-      const metodoConfig = await validarMetodoPagoReal(client, metodoPago, {
-        canal,
-        referenciaExterna,
-      });
-
-      if (!usuarioId) {
-        throw modelError("El usuario que registra el abono es requerido.");
+      let metodoConfig;
+      if (pagoPendiente) {
+        metodoConfig = {
+          codigo: "TRANSFERENCIA",
+          requiere_referencia: true,
+        };
+      } else {
+        metodoConfig = await validarMetodoPagoReal(client, metodoFinal, {
+          canal,
+          referenciaExterna: referenciaFinal,
+        });
       }
 
-      const { rows: openShiftRows } = await client.query(
-        `
-          SELECT id
-          FROM ventas.corte_caja
-          WHERE usuario_id = $1::uuid
-            AND fin_turno IS NULL
-          LIMIT 1
-        `,
-        [usuarioId],
-      );
-
-      if (!openShiftRows[0]) {
-        throw modelError(
-          "Debes abrir turno/corte antes de registrar un abono de crédito.",
+      if (requiereTurno) {
+        const { rows: openShiftRows } = await client.query(
+          `
+            SELECT id
+            FROM ventas.corte_caja
+            WHERE usuario_id = $1::uuid
+              AND fin_turno IS NULL
+            LIMIT 1
+          `,
+          [usuarioId],
         );
+
+        if (!openShiftRows[0]) {
+          throw modelError(
+            "Debes abrir turno/corte antes de registrar un abono de crédito.",
+          );
+        }
       }
 
       const rawConfig = await obtenerParametrosCredito(client);
@@ -992,39 +1040,77 @@ export async function registrarAbonoCredito(
           ? "LIQUIDACION_CREDITO"
           : "ABONO_CREDITO";
 
-      const { rows: paymentRows } = await client.query(
-        `
-          INSERT INTO ventas.pagos (
-            pedido_id,
-            credito_id,
-            monto,
-            metodo,
-            referencia_externa,
-            fecha_pago,
+      let pago;
+      if (pagoPendiente) {
+        const { rows } = await client.query(
+          `
+            UPDATE ventas.pagos
+            SET
+              monto = $3,
+              metodo = 'TRANSFERENCIA',
+              referencia_externa = $4,
+              fecha_pago = $5::timestamptz,
+              concepto = $6::public.concepto_pago,
+              estado = 'CONFIRMADO',
+              usuario_id = $7::uuid
+            WHERE id = $1::uuid
+              AND credito_id = $2::uuid
+              AND estado = 'PENDIENTE'
+            RETURNING *
+          `,
+          [
+            pagoPendiente.id,
+            credito.id,
+            centavosADinero(paymentCents),
+            referenciaFinal,
+            fechaPago,
             concepto,
-            estado,
-            usuario_id
-          )
-          VALUES (
-            $1, $2, $3, $4::public.metodo_pago_enum, $5,
-            $6::timestamptz, $7::public.concepto_pago,
-            'CONFIRMADO', $8
-          )
-          RETURNING *
-        `,
-        [
-          credito.pedido_id,
-          credito.id,
-          centavosADinero(paymentCents),
-          metodoConfig.codigo,
-          referenciaExterna,
-          fechaPago,
-          concepto,
-          usuarioId,
-        ],
-      );
+            usuarioId,
+          ],
+        );
+        pago = rows[0];
 
-      const pago = paymentRows[0];
+        if (!pago) {
+          throw modelError(
+            "La transferencia ya no está pendiente y no puede confirmarse.",
+            "CONFLICT",
+          );
+        }
+      } else {
+        const { rows } = await client.query(
+          `
+            INSERT INTO ventas.pagos (
+              pedido_id,
+              credito_id,
+              monto,
+              metodo,
+              referencia_externa,
+              fecha_pago,
+              concepto,
+              estado,
+              usuario_id
+            )
+            VALUES (
+              $1, $2, $3, $4::public.metodo_pago_enum, $5,
+              $6::timestamptz, $7::public.concepto_pago,
+              'CONFIRMADO', $8
+            )
+            RETURNING *
+          `,
+          [
+            credito.pedido_id,
+            credito.id,
+            centavosADinero(paymentCents),
+            metodoConfig.codigo,
+            referenciaFinal,
+            fechaPago,
+            concepto,
+            usuarioId,
+          ],
+        );
+        pago = rows[0];
+      }
+
       let aplicaciones = [];
 
       if (credito.datos_calendario_completos) {
@@ -1178,7 +1264,7 @@ export async function registrarAbonoCredito(
           globalBalanceBefore,
           globalBalanceAfter,
           metodoConfig.codigo,
-          referenciaExterna,
+          referenciaFinal,
           observaciones,
         ],
       );
@@ -1188,6 +1274,256 @@ export async function registrarAbonoCredito(
         aplicaciones,
         credito: updatedCredit,
         saldo_global_cliente: globalBalanceAfter,
+      };
+    },
+    { usuarioId },
+  );
+}
+
+export async function crearSolicitudTransferenciaCreditoCliente(
+  db,
+  creditoId,
+  {
+    usuarioId,
+    monto,
+  },
+) {
+  return withTransaction(
+    db,
+    async (client) => {
+      const { rows: creditRows } = await client.query(
+        `
+          SELECT
+            c.*,
+            cl.usuario_id,
+            p.folio AS pedido_folio
+          FROM clientes.creditos c
+          JOIN clientes.clientes cl ON cl.id = c.cliente_id
+          LEFT JOIN ventas.pedidos p ON p.id = c.pedido_id
+          WHERE c.id = $1::uuid
+            AND cl.usuario_id = $2::uuid
+          FOR UPDATE OF c, cl
+        `,
+        [creditoId, usuarioId],
+      );
+
+      const credito = creditRows[0];
+      if (!credito) {
+        throw modelError(
+          "Crédito no encontrado o no pertenece a tu cuenta.",
+          "NOT_FOUND",
+        );
+      }
+
+      if (!["ACTIVO", "EN_MORA", "INCUMPLIDO"].includes(credito.estado)) {
+        throw modelError(`No se puede pagar un crédito ${credito.estado}.`);
+      }
+
+      const { rows: methodRows } = await client.query(
+        `
+          SELECT
+            codigo,
+            nombre,
+            descripcion,
+            activo_web,
+            requiere_referencia,
+            requiere_confirmacion_manual,
+            instrucciones_web,
+            config_publica
+          FROM configuracion.metodos_pago
+          WHERE codigo = 'TRANSFERENCIA'
+          LIMIT 1
+        `,
+      );
+
+      const metodo = methodRows[0];
+      if (!metodo || metodo.activo_web !== true) {
+        throw modelError(
+          "Transferencia no está disponible actualmente para pagos web.",
+          "CONFLICT",
+        );
+      }
+
+      const { rows: pendingRows } = await client.query(
+        `
+          SELECT *
+          FROM ventas.pagos
+          WHERE credito_id = $1::uuid
+            AND metodo = 'TRANSFERENCIA'
+            AND estado = 'PENDIENTE'
+            AND concepto IN ('ABONO_CREDITO', 'LIQUIDACION_CREDITO')
+          ORDER BY fecha_pago DESC, id DESC
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [credito.id],
+      );
+
+      if (pendingRows[0]) {
+        return {
+          pago: pendingRows[0],
+          metodo,
+          reutilizado: true,
+        };
+      }
+
+      const paymentCents = dineroACentavos(monto, "monto");
+      const creditBalanceCents = dineroACentavos(
+        credito.saldo_pendiente,
+        "saldo_pendiente",
+      );
+
+      if (paymentCents <= 0) {
+        throw modelError("El monto de la transferencia debe ser mayor a 0.");
+      }
+      if (paymentCents > creditBalanceCents) {
+        throw modelError(
+          "La transferencia no puede exceder el saldo pendiente del crédito.",
+        );
+      }
+
+      if (credito.datos_calendario_completos) {
+        const { rows: installments } = await client.query(
+          `
+            SELECT *
+            FROM clientes.credito_cuotas
+            WHERE credito_id = $1::uuid
+              AND saldo_pendiente > 0
+              AND estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
+            ORDER BY
+              CASE WHEN estado = 'VENCIDA' THEN 0 ELSE 1 END,
+              fecha_vencimiento,
+              numero_cuota
+            FOR UPDATE
+          `,
+          [credito.id],
+        );
+        const installmentBalance = installments.reduce(
+          (sum, item) => sum + dineroACentavos(item.saldo_pendiente),
+          0,
+        );
+
+        if (installmentBalance !== creditBalanceCents) {
+          throw modelError(
+            "El saldo del crédito no coincide con la suma de cuotas pendientes.",
+            "CREDIT_RECONCILIATION",
+          );
+        }
+
+        const rawConfig = await obtenerParametrosCredito(client);
+        const config = normalizarConfiguracionCredito(rawConfig);
+
+        construirAplicacionesCuotas({
+          cuotas: installments,
+          monto: centavosADinero(paymentCents),
+          configuracion: config,
+          fechaPago: new Date().toISOString(),
+        });
+      }
+
+      const referencia = `CRED-${
+        credito.pedido_folio || credito.id.slice(0, 8)
+      }-${randomUUID().slice(0, 8).toUpperCase()}`;
+      const concepto =
+        paymentCents === creditBalanceCents
+          ? "LIQUIDACION_CREDITO"
+          : "ABONO_CREDITO";
+
+      const { rows } = await client.query(
+        `
+          INSERT INTO ventas.pagos (
+            pedido_id,
+            credito_id,
+            monto,
+            metodo,
+            referencia_externa,
+            fecha_pago,
+            concepto,
+            estado,
+            usuario_id
+          )
+          VALUES (
+            $1, $2, $3, 'TRANSFERENCIA', $4, now(),
+            $5::public.concepto_pago, 'PENDIENTE', NULL
+          )
+          RETURNING *
+        `,
+        [
+          credito.pedido_id,
+          credito.id,
+          centavosADinero(paymentCents),
+          referencia,
+          concepto,
+        ],
+      );
+
+      return {
+        pago: rows[0],
+        metodo,
+        reutilizado: false,
+      };
+    },
+    { usuarioId },
+  );
+}
+
+export async function confirmarTransferenciaCreditoPendiente(
+  db,
+  creditoId,
+  pagoId,
+  { usuarioId, referenciaExterna = null } = {},
+) {
+  return registrarAbonoCredito(db, creditoId, {
+    usuarioId,
+    pagoPendienteId: pagoId,
+    referenciaExterna,
+    requiereTurno: false,
+    canal: "WEB",
+    observaciones: "Transferencia web confirmada por administración.",
+  });
+}
+
+export async function rechazarTransferenciaCreditoPendiente(
+  db,
+  creditoId,
+  pagoId,
+  { usuarioId } = {},
+) {
+  return withTransaction(
+    db,
+    async (client) => {
+      const { rows } = await client.query(
+        `
+          UPDATE ventas.pagos
+          SET
+            estado = 'RECHAZADO',
+            usuario_id = $3::uuid
+          WHERE id = $1::uuid
+            AND credito_id = $2::uuid
+            AND metodo = 'TRANSFERENCIA'
+            AND estado = 'PENDIENTE'
+            AND concepto IN ('ABONO_CREDITO', 'LIQUIDACION_CREDITO')
+          RETURNING *
+        `,
+        [pagoId, creditoId, usuarioId],
+      );
+
+      const pago = rows[0];
+      if (!pago) {
+        throw modelError(
+          "No se encontró una transferencia pendiente para rechazar.",
+          "NOT_FOUND",
+        );
+      }
+
+      const { rows: creditRows } = await client.query(
+        `SELECT * FROM clientes.creditos WHERE id = $1::uuid LIMIT 1`,
+        [creditoId],
+      );
+
+      return {
+        pago,
+        credito: creditRows[0] || null,
       };
     },
     { usuarioId },

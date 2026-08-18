@@ -22,6 +22,7 @@ import {
   patchMiDireccionPrincipal,
   patchMiPerfil,
   postMiDireccion,
+  postMiPagoCreditoTransferencia,
 } from "../controllers/cuenta.controller.js";
 import { postAlexaWidgetTarget } from "../controllers/alexaSync.controller.js";
 
@@ -136,6 +137,13 @@ router.get(
   query("offset").optional().isInt({ min: 0 }),
   validar,
   getMisCuotasCredito,
+);
+router.post(
+  "/credito/creditos/:creditoId/pagos/transferencia",
+  param("creditoId").isUUID(),
+  body("monto").isFloat({ gt: 0 }),
+  validar,
+  postMiPagoCreditoTransferencia,
 );
 router.get(
   "/credito/creditos/:creditoId/pagos",

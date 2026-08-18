@@ -1,6 +1,7 @@
 import { programarSincronizacionAlexa } from "../services/alexa-sync.service.js";
 import {
   cancelarCredito,
+  confirmarTransferenciaCreditoPendiente,
   crearCredito,
   listarCreditos,
   obtenerComprobantePagoCredito,
@@ -9,6 +10,7 @@ import {
   obtenerEstadoCreditoCliente,
   obtenerParametrosCredito,
   registrarAbonoCredito,
+  rechazarTransferenciaCreditoPendiente,
 } from "../models/credito.model.js";
 import {
   calcularPlanCredito,
@@ -279,7 +281,7 @@ export async function postAbonoCredito(req, res) {
         saldo_pendiente: Number(result.credito.saldo_pendiente),
       },
     });
-    programarSincronizacionAlexa(created.credito.cliente_id);
+    programarSincronizacionAlexa(result.credito.cliente_id);
 
     return res.status(201).json({
       ok: true,
@@ -290,6 +292,98 @@ export async function postAbonoCredito(req, res) {
     });
   } catch (error) {
     return handleCreditoError(res, error, "Error registrando abono de crédito");
+  }
+}
+
+export async function postConfirmarTransferenciaCredito(req, res) {
+  try {
+    const creditoId = validarCreditoId(req.params.creditoId);
+    const pagoId = validarPagoId(req.params.pagoId);
+    const referenciaExterna =
+      req.body?.referencia_externa === undefined ||
+      req.body?.referencia_externa === null ||
+      req.body?.referencia_externa === ""
+        ? null
+        : String(req.body.referencia_externa).trim();
+
+    const result = await confirmarTransferenciaCreditoPendiente(
+      req.db,
+      creditoId,
+      pagoId,
+      {
+        usuarioId: req.user?.id ?? null,
+        referenciaExterna,
+      },
+    );
+
+    await registrarAuditoriaCredito(req.db, {
+      modulo: "clientes.creditos",
+      accion: "payment_transfer_confirm",
+      descripcion: `Se confirmó la transferencia ${pagoId} del crédito ${creditoId}.`,
+      usuarioId: req.user?.id ?? null,
+      metadata: {
+        credito_id: creditoId,
+        pago_id: pagoId,
+        monto: Number(result.pago.monto),
+        saldo_pendiente: Number(result.credito.saldo_pendiente),
+      },
+    });
+
+    programarSincronizacionAlexa(result.credito.cliente_id);
+
+    return res.json({
+      ok: true,
+      msg: "Transferencia confirmada y aplicada al crédito.",
+      data: result,
+    });
+  } catch (error) {
+    return handleCreditoError(
+      res,
+      error,
+      "Error confirmando transferencia de crédito",
+    );
+  }
+}
+
+export async function postRechazarTransferenciaCredito(req, res) {
+  try {
+    const creditoId = validarCreditoId(req.params.creditoId);
+    const pagoId = validarPagoId(req.params.pagoId);
+
+    const result = await rechazarTransferenciaCreditoPendiente(
+      req.db,
+      creditoId,
+      pagoId,
+      { usuarioId: req.user?.id ?? null },
+    );
+
+    await registrarAuditoriaCredito(req.db, {
+      modulo: "clientes.creditos",
+      accion: "payment_transfer_reject",
+      descripcion: `Se rechazó la transferencia ${pagoId} del crédito ${creditoId}.`,
+      usuarioId: req.user?.id ?? null,
+      metadata: {
+        credito_id: creditoId,
+        pago_id: pagoId,
+        monto: Number(result.pago.monto),
+      },
+    });
+
+    if (result.credito?.cliente_id) {
+      programarSincronizacionAlexa(result.credito.cliente_id);
+    }
+
+    return res.json({
+      ok: true,
+      msg: "Transferencia rechazada.",
+      data: result,
+    });
+  } catch (error) {
+    return handleCreditoError(
+      res,
+      error,
+      "Error rechazando transferencia de crédito",
+    );
   }
 }
 
@@ -315,7 +409,7 @@ export async function postCancelarCredito(req, res) {
       },
     });
 
-    programarSincronizacionAlexa(created.credito.cliente_id);
+    programarSincronizacionAlexa(data.cliente_id);
 
     return res.json({ ok: true, data });
   } catch (error) {
