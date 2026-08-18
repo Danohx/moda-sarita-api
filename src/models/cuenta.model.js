@@ -574,28 +574,36 @@ export async function obtenerMiCredito(db, usuarioId) {
             WHERE c.estado IN ('ACTIVO', 'EN_MORA', 'INCUMPLIDO')
           )::int AS creditos_activos,
           COUNT(DISTINCT c.id) FILTER (
-            WHERE c.estado = 'EN_MORA'
+            WHERE cc.saldo_pendiente > 0
+                 AND cc.estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
+              AND cc.fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date
           )::int AS creditos_en_mora,
           COUNT(DISTINCT c.id) FILTER (
             WHERE c.estado = 'INCUMPLIDO'
           )::int AS creditos_incumplidos,
           COUNT(cc.id) FILTER (
-            WHERE cc.estado = 'VENCIDA'
-              AND cc.saldo_pendiente > 0
+            WHERE cc.saldo_pendiente > 0
+              AND cc.estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
+              AND cc.fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date
           )::int AS cuotas_vencidas,
           COALESCE(
             SUM(cc.saldo_pendiente) FILTER (
-              WHERE cc.estado = 'VENCIDA'
-                AND cc.saldo_pendiente > 0
+              WHERE cc.saldo_pendiente > 0
+                AND cc.estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
+                AND cc.fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date
             ),
             0
           )::numeric(12,2) AS total_vencido,
           COALESCE(
             MAX(
-              GREATEST(CURRENT_DATE - cc.fecha_vencimiento, 0)
+              GREATEST(
+                (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date - cc.fecha_vencimiento,
+                0
+              )
             ) FILTER (
-              WHERE cc.estado = 'VENCIDA'
-                AND cc.saldo_pendiente > 0
+              WHERE cc.saldo_pendiente > 0
+                AND cc.estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
+                AND cc.fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date
             ),
             0
           )::int AS dias_maximos_atraso
@@ -609,16 +617,38 @@ export async function obtenerMiCredito(db, usuarioId) {
     db.query(
       `
         SELECT
+          cc.id AS cuota_id,
+          cc.credito_id,
+          c.pedido_id,
+          p.folio AS pedido_folio,
+          cc.numero_cuota,
           cc.fecha_vencimiento AS proxima_fecha_pago,
-          cc.saldo_pendiente AS monto_proximo_pago
+          cc.saldo_pendiente AS monto_proximo_pago,
+          c.frecuencia_pago,
+          CASE
+            WHEN cc.fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date
+              THEN 'VENCIDA'
+            ELSE cc.estado::text
+          END AS estado_cuota,
+          (
+            cc.fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date
+          ) AS pago_vencido,
+          GREATEST(
+            (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date - cc.fecha_vencimiento,
+            0
+          )::int AS dias_atraso
         FROM clientes.credito_cuotas cc
         JOIN clientes.creditos c ON c.id = cc.credito_id
+        LEFT JOIN ventas.pedidos p ON p.id = c.pedido_id
         WHERE c.cliente_id = $1::uuid
           AND c.estado IN ('ACTIVO', 'EN_MORA', 'INCUMPLIDO')
           AND cc.saldo_pendiente > 0
           AND cc.estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
         ORDER BY
-          CASE WHEN cc.estado = 'VENCIDA' THEN 0 ELSE 1 END,
+          CASE
+            WHEN cc.fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date THEN 0
+            ELSE 1
+          END,
           cc.fecha_vencimiento,
           cc.numero_cuota
         LIMIT 1
@@ -697,6 +727,21 @@ export async function obtenerMiCredito(db, usuarioId) {
       proximaCuota.monto_proximo_pago === undefined
         ? null
         : Number(proximaCuota.monto_proximo_pago),
+    proximo_pago_detalle: proximaCuota.proxima_fecha_pago
+      ? {
+          credito_id: proximaCuota.credito_id || null,
+          pedido_id: proximaCuota.pedido_id || null,
+          pedido_folio: proximaCuota.pedido_folio || null,
+          cuota_id: proximaCuota.cuota_id || null,
+          numero_cuota: Number(proximaCuota.numero_cuota || 0),
+          fecha_vencimiento: proximaCuota.proxima_fecha_pago,
+          monto_pendiente: Number(proximaCuota.monto_proximo_pago || 0),
+          frecuencia_pago: proximaCuota.frecuencia_pago || null,
+          estado: proximaCuota.estado_cuota || null,
+          vencido: proximaCuota.pago_vencido === true,
+          dias_atraso: Number(proximaCuota.dias_atraso || 0),
+        }
+      : null,
     pagos_vencidos: cuotasVencidas,
     cuotas_vencidas: cuotasVencidas,
     total_vencido: totalVencido,
@@ -862,7 +907,13 @@ export async function listarMisCuotasCredito(
         monto_condonado,
         saldo_pendiente,
         fecha_pago_completo,
-        estado
+        CASE
+          WHEN saldo_pendiente > 0
+            AND estado IN ('VENCIDA', 'PENDIENTE', 'PARCIAL')
+            AND fecha_vencimiento < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Mexico_City')::date
+            THEN 'VENCIDA'
+          ELSE estado::text
+        END AS estado
       FROM clientes.credito_cuotas
       WHERE credito_id = $1::uuid
       ORDER BY numero_cuota ASC
