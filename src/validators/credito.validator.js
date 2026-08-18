@@ -65,6 +65,11 @@ function optionalBoolean(value, fieldName) {
   throw domainError(`${fieldName} debe ser booleano.`);
 }
 
+function optionalFechaISO(value, fieldName) {
+  if (value === undefined || value === null || value === "") return null;
+  return normalizarFechaISO(value, fieldName);
+}
+
 export function validarPayloadSimulacionCredito(payload) {
   const body = requiredObject(payload);
   const frequency = String(body.frecuencia_pago || "")
@@ -91,7 +96,7 @@ export function validarPayloadSimulacionCredito(payload) {
       max: 60,
     }),
     frecuencia_pago: frequency,
-    fecha_primer_vencimiento: normalizarFechaISO(
+    fecha_primer_vencimiento: optionalFechaISO(
       body.fecha_primer_vencimiento,
       "fecha_primer_vencimiento",
     ),
@@ -237,7 +242,7 @@ export function validarPayloadCreditoPOS(payload) {
       max: 60,
     }),
     frecuencia_pago: frequency,
-    fecha_primer_vencimiento: normalizarFechaISO(
+    fecha_primer_vencimiento: optionalFechaISO(
       body.fecha_primer_vencimiento,
       "credito.fecha_primer_vencimiento",
     ),

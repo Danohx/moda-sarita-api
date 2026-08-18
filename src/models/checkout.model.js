@@ -8,8 +8,6 @@ import {
   calcularPlanCredito,
   evaluarElegibilidadCliente,
   normalizarConfiguracionCredito,
-  sumarDiasISO,
-  sumarMesesAncladosISO,
 } from "../services/credito.service.js";
 
 function checkoutError(message, status = 400, code = "VALIDATION") {
@@ -220,14 +218,6 @@ async function getClienteCreditoByUsuario(db, usuarioId, { lock = false } = {}) 
 
 async function getClienteForUpdate(client, usuarioId) {
   return getClienteCreditoByUsuario(client, usuarioId, { lock: true });
-}
-
-function nextCreditDueDate(frequency) {
-  const today = new Date().toISOString().slice(0, 10);
-  const normalized = String(frequency || "").toUpperCase();
-  if (normalized === "SEMANAL") return sumarDiasISO(today, 7);
-  if (normalized === "QUINCENAL") return sumarDiasISO(today, 15);
-  return sumarMesesAncladosISO(today, 1);
 }
 
 function calcularEngancheMinimoWeb(totalCompra, config) {
@@ -952,7 +942,6 @@ export async function crearPedidoWeb(
         enganche: engancheMinimo,
         plazoMeses,
         frecuenciaPago,
-        fechaPrimerVencimiento: nextCreditDueDate(frecuenciaPago),
         configuracion: parametrosCredito,
       });
 

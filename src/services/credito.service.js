@@ -96,9 +96,7 @@ export function normalizarFechaISO(value, fieldName = "fecha") {
 }
 
 function isoToUtcDate(isoDate) {
-  const [year, month, day] = normalizarFechaISO(isoDate)
-    .split("-")
-    .map(Number);
+  const [year, month, day] = normalizarFechaISO(isoDate).split("-").map(Number);
   return new Date(Date.UTC(year, month - 1, day));
 }
 
@@ -110,6 +108,54 @@ export function sumarDiasISO(isoDate, days) {
   const date = isoToUtcDate(isoDate);
   date.setUTCDate(date.getUTCDate() + Number(days));
   return utcDateToIso(date);
+}
+
+export function obtenerFechaNegocioISO(
+  date = new Date(),
+  timeZone = process.env.CREDIT_OVERDUE_TIMEZONE || "America/Mexico_City",
+) {
+  let parts;
+
+  try {
+    parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+  } catch {
+    throw domainError(
+      `La zona horaria de crédito no es válida: ${timeZone}.`,
+      "CONFIGURATION",
+    );
+  }
+
+  const values = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+export function calcularPrimerVencimiento({
+  fechaInicioCredito,
+  frecuenciaPago,
+}) {
+  const startDate = normalizarFechaISO(
+    fechaInicioCredito,
+    "fecha_inicio_credito",
+  );
+  const frecuencia = String(frecuenciaPago || "")
+    .trim()
+    .toUpperCase();
+
+  if (!FRECUENCIAS.has(frecuencia)) {
+    throw domainError("frecuencia_pago no es válida.");
+  }
+
+  if (frecuencia === "SEMANAL") return sumarDiasISO(startDate, 7);
+  if (frecuencia === "QUINCENAL") return sumarDiasISO(startDate, 15);
+  return sumarMesesAncladosISO(startDate, 1);
 }
 
 /**
@@ -126,7 +172,9 @@ export function sumarMesesAncladosISO(isoDate, months) {
   const firstOfTarget = new Date(Date.UTC(year, month + Number(months), 1));
   const targetYear = firstOfTarget.getUTCFullYear();
   const targetMonth = firstOfTarget.getUTCMonth();
-  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const lastDay = new Date(
+    Date.UTC(targetYear, targetMonth + 1, 0),
+  ).getUTCDate();
 
   return utcDateToIso(
     new Date(Date.UTC(targetYear, targetMonth, Math.min(originalDay, lastDay))),
@@ -134,8 +182,13 @@ export function sumarMesesAncladosISO(isoDate, months) {
 }
 
 export function calcularNumeroCuotas(plazoMeses, frecuenciaPago) {
-  const plazo = normalizeInteger(plazoMeses, "plazo_meses", { min: 1, max: 60 });
-  const frecuencia = String(frecuenciaPago || "").trim().toUpperCase();
+  const plazo = normalizeInteger(plazoMeses, "plazo_meses", {
+    min: 1,
+    max: 60,
+  });
+  const frecuencia = String(frecuenciaPago || "")
+    .trim()
+    .toUpperCase();
 
   if (!FRECUENCIAS.has(frecuencia)) {
     throw domainError("frecuencia_pago no es válida.");
@@ -157,7 +210,9 @@ export function calcularFechasVencimiento({
     min: 1,
     max: 720,
   });
-  const frecuencia = String(frecuenciaPago || "").trim().toUpperCase();
+  const frecuencia = String(frecuenciaPago || "")
+    .trim()
+    .toUpperCase();
 
   if (!FRECUENCIAS.has(frecuencia)) {
     throw domainError("frecuencia_pago no es válida.");
@@ -280,10 +335,14 @@ export function normalizarConfiguracionCredito(parametros) {
       normalizeInteger(item, "plazo permitido", { min: 1, max: 60 }),
     ),
     frecuenciasPermitidas: normalizedFrequencies,
-    diasGracia: normalizeInteger(values["credito.dias_gracia"], "días de gracia", {
-      min: 0,
-      max: 60,
-    }),
+    diasGracia: normalizeInteger(
+      values["credito.dias_gracia"],
+      "días de gracia",
+      {
+        min: 0,
+        max: 60,
+      },
+    ),
     porcentajeEngancheMinimo: normalizeInteger(
       values["credito.porcentaje_enganche_minimo"],
       "porcentaje de enganche mínimo",
@@ -338,7 +397,8 @@ export function calcularPlanCredito({
   enganche = 0,
   plazoMeses,
   frecuenciaPago,
-  fechaPrimerVencimiento,
+  fechaPrimerVencimiento = null,
+  fechaInicioCredito = null,
   diasGracia,
   configuracion,
 }) {
@@ -352,7 +412,9 @@ export function calcularPlanCredito({
     min: 1,
     max: 60,
   });
-  const frequency = String(frecuenciaPago || "").trim().toUpperCase();
+  const frequency = String(frecuenciaPago || "")
+    .trim()
+    .toUpperCase();
   const graceDays =
     diasGracia === undefined || diasGracia === null
       ? config?.diasGracia
@@ -386,7 +448,9 @@ export function calcularPlanCredito({
     }
 
     if (downPaymentCents === 0 && !config.permiteEngancheCero) {
-      throw domainError("La configuración actual no permite enganche de $0.00.");
+      throw domainError(
+        "La configuración actual no permite enganche de $0.00.",
+      );
     }
 
     const minimumDownPayment = Math.ceil(
@@ -417,8 +481,28 @@ export function calcularPlanCredito({
     centavosADinero(financedCents),
     installmentCount,
   );
+
+  // La fecha de la primera cuota es una regla de negocio del backend.
+  // Se calcula desde la fecha real de inicio/otorgamiento del crédito para
+  // evitar que un cliente mande una fecha arbitraria o que el frontend quede
+  // desfasado (por ejemplo 10-ago + 15 días debe ser 25-ago).
+  const startDate = fechaInicioCredito
+    ? normalizarFechaISO(fechaInicioCredito, "fecha_inicio_credito")
+    : obtenerFechaNegocioISO();
+  const expectedFirstDate = calcularPrimerVencimiento({
+    fechaInicioCredito: startDate,
+    frecuenciaPago: frequency,
+  });
+
+  // Se conserva el parámetro por compatibilidad con clientes anteriores, pero
+  // ya no gobierna el calendario. Si llega una fecha válida distinta, el
+  // backend la corrige usando la regla de frecuencia.
+  if (fechaPrimerVencimiento) {
+    normalizarFechaISO(fechaPrimerVencimiento, "fecha_primer_vencimiento");
+  }
+
   const dates = calcularFechasVencimiento({
-    fechaPrimerVencimiento,
+    fechaPrimerVencimiento: expectedFirstDate,
     numeroCuotas: installmentCount,
     frecuenciaPago: frequency,
   });
@@ -443,6 +527,7 @@ export function calcularPlanCredito({
     plazo_meses: term,
     frecuencia_pago: frequency,
     numero_cuotas: installmentCount,
+    fecha_inicio_credito: startDate,
     fecha_primer_vencimiento: dates[0],
     fecha_vencimiento_final: dates[dates.length - 1],
     dias_gracia: graceDays,

@@ -104,7 +104,6 @@ export async function postSimularCredito(req, res) {
       enganche: input.enganche,
       plazoMeses: input.plazo_meses,
       frecuenciaPago: input.frecuencia_pago,
-      fechaPrimerVencimiento: input.fecha_primer_vencimiento,
       configuracion: parametros,
     });
 
@@ -206,7 +205,6 @@ export async function postCrearCredito(req, res) {
       enganche: input.enganche,
       plazoMeses: input.plazo_meses,
       frecuenciaPago: input.frecuencia_pago,
-      fechaPrimerVencimiento: input.fecha_primer_vencimiento,
       configuracion: parametros,
     });
 

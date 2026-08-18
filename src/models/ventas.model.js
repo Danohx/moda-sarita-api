@@ -402,7 +402,6 @@ export async function crearVentaPOS(
         enganche: creditoInput.enganche,
         plazoMeses: creditoInput.plazo_meses,
         frecuenciaPago: creditoInput.frecuencia_pago,
-        fechaPrimerVencimiento: creditoInput.fecha_primer_vencimiento,
         configuracion: parametrosCredito,
       });
     }

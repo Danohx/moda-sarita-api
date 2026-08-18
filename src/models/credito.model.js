@@ -2,6 +2,7 @@
 // SQL y transacciones del módulo de crédito.
 
 import {
+  calcularPlanCredito,
   centavosADinero,
   dineroACentavos,
   normalizarConfiguracionCredito,
@@ -19,6 +20,27 @@ async function setAuditContext(client, usuarioId) {
   await client.query("SELECT set_config('app.user_id', $1, true)", [
     usuarioId ? String(usuarioId) : "",
   ]);
+}
+
+async function obtenerFechaNegocioEnTransaccion(client) {
+  const timezone =
+    process.env.CREDIT_OVERDUE_TIMEZONE || "America/Mexico_City";
+
+  const { rows } = await client.query(
+    `
+      SELECT to_char(timezone($1, CURRENT_TIMESTAMP), 'YYYY-MM-DD') AS fecha
+    `,
+    [timezone],
+  );
+
+  if (!rows[0]?.fecha) {
+    throw modelError(
+      "No se pudo determinar la fecha de negocio para el crédito.",
+      "CONFIGURATION",
+    );
+  }
+
+  return rows[0].fecha;
 }
 
 async function withTransaction(db, callback, { usuarioId = null } = {}) {
@@ -483,6 +505,21 @@ export async function crearCreditoEnTransaccion(
   if (dineroACentavos(pedido.total) !== dineroACentavos(plan.total_compra)) {
     throw modelError("El total del plan no coincide con el total del pedido.");
   }
+
+  // El calendario definitivo se vuelve a calcular al activar el crédito.
+  // Esto es especialmente importante en créditos WEB con enganche por
+  // transferencia: el checkout puede ocurrir un día y la confirmación del
+  // enganche varios días después. La primera cuota debe contar desde la fecha
+  // real de activación/enganche, no desde una fecha enviada por el frontend.
+  const fechaInicioCredito = await obtenerFechaNegocioEnTransaccion(client);
+  plan = calcularPlanCredito({
+    totalCompra: plan.total_compra,
+    enganche: plan.enganche,
+    plazoMeses: plan.plazo_meses,
+    frecuenciaPago: plan.frecuencia_pago,
+    fechaInicioCredito,
+    diasGracia: plan.dias_gracia,
+  });
 
   const { rows: duplicateRows } = await client.query(
     `SELECT id FROM clientes.creditos WHERE pedido_id = $1::uuid LIMIT 1`,
